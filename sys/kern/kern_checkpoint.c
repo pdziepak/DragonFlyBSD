@@ -75,9 +75,10 @@
 static int elf_loadphdrs(struct file *fp,  Elf_Phdr *phdr, int numsegs);
 static int elf_getnotes(struct lwp *lp, struct file *fp, size_t notesz);
 static int elf_demarshalnotes(void *src, prpsinfo_t *psinfo,
-		 prstatus_t *status, prfpregset_t *fpregset, int nthreads); 
+		 prstatus_t *status, prfpregset_t *fpregset, prsavetls_t *tls,
+		 int nthreads);
 static int elf_loadnotes(struct lwp *, prpsinfo_t *, prstatus_t *,
-		 prfpregset_t *);
+		 prfpregset_t *, prsavetls_t *);
 static int elf_getsigs(struct lwp *lp, struct file *fp);
 static int elf_getfiles(struct lwp *lp, struct file *fp);
 static int elf_gettextvp(struct proc *p, struct file *fp);
@@ -182,6 +183,7 @@ elf_getnotes(struct lwp *lp, struct file *fp, size_t notesz)
 	prpsinfo_t *psinfo;
 	prstatus_t *status;
 	prfpregset_t *fpregset;
+	prsavetls_t *tls;
 
 	nthreads = (notesz - sizeof(prpsinfo_t))/(sizeof(prstatus_t) + 
 						  sizeof(prfpregset_t));
@@ -192,17 +194,18 @@ elf_getnotes(struct lwp *lp, struct file *fp, size_t notesz)
 	psinfo  = kmalloc(sizeof(prpsinfo_t), M_TEMP, M_ZERO | M_WAITOK);
 	status  = kmalloc(nthreads*sizeof(prstatus_t), M_TEMP, M_WAITOK);
 	fpregset  = kmalloc(nthreads*sizeof(prfpregset_t), M_TEMP, M_WAITOK);
+	tls	= kmalloc(nthreads*sizeof(prsavetls_t), M_TEMP, M_WAITOK);
 	note = kmalloc(notesz, M_TEMP, M_WAITOK);
 
 	
 	PRINTF(("reading notes section\n"));
 	if ((error = read_check(fp, note, notesz)) != 0)
 		goto done;
-	error = elf_demarshalnotes(note, psinfo, status, fpregset, nthreads);
+	error = elf_demarshalnotes(note, psinfo, status, fpregset, tls, nthreads);
 	if (error)
 		goto done;
 	/* fetch register state from notes */
-	error = elf_loadnotes(lp, psinfo, status, fpregset);
+	error = elf_loadnotes(lp, psinfo, status, fpregset, tls);
  done:
 	if (psinfo)
 		kfree(psinfo, M_TEMP);
@@ -210,6 +213,8 @@ elf_getnotes(struct lwp *lp, struct file *fp, size_t notesz)
 		kfree(status, M_TEMP);
 	if (fpregset)
 		kfree(fpregset, M_TEMP);
+	if (tls)
+		kfree(tls, M_TEMP);
 	if (note)
 		kfree(note, M_TEMP);
 	return error;
@@ -283,7 +288,7 @@ done:
 
 static int
 elf_loadnotes(struct lwp *lp, prpsinfo_t *psinfo, prstatus_t *status,
-	   prfpregset_t *fpregset) 
+	   prfpregset_t *fpregset, prsavetls_t *tls)
 {
 	struct proc *p = lp->lwp_proc;
 	int error;
@@ -304,6 +309,9 @@ elf_loadnotes(struct lwp *lp, prpsinfo_t *psinfo, prstatus_t *status,
 	if ((error = set_regs(lp, &status->pr_reg)) != 0)
 		goto done;
 	error = set_fpregs(lp, fpregset);
+/* XXX SJG */
+kprintf("xxx: restoring TLS-fu\n");
+bcopy(tls, &lp->lwp_thread->td_tls, sizeof *tls);
 	strlcpy(p->p_comm, psinfo->pr_fname, sizeof(p->p_comm));
 	/* XXX psinfo->pr_psargs not yet implemented */
  done:	
@@ -354,7 +362,7 @@ elf_getnote(void *src, size_t *off, const char *name, unsigned int type,
 
 static int
 elf_demarshalnotes(void *src, prpsinfo_t *psinfo, prstatus_t *status, 
-		   prfpregset_t *fpregset, int nthreads) 
+		   prfpregset_t *fpregset, prsavetls_t *tls, int nthreads)
 {
 	int i;
 	int error;
@@ -373,6 +381,10 @@ elf_demarshalnotes(void *src, prpsinfo_t *psinfo, prstatus_t *status,
 			   (void **)&fpregset, sizeof(prfpregset_t));
 	if (error)
 		goto done;
+	error = elf_getnote(src, &off, "CORE", NT_TLS,
+			    (void **)&tls, sizeof(prsavetls_t));
+	if (error)
+		goto done;
 
 	/*
 	 * The remaining portion needs to be an integer multiple
@@ -386,6 +398,10 @@ elf_demarshalnotes(void *src, prpsinfo_t *psinfo, prstatus_t *status,
 			goto done;
 		error = elf_getnote(src, &off, "CORE", NT_FPREGSET,
 				   (void **)&fpregset, sizeof(prfpregset_t));
+		if (error)
+			goto done;
+		error = elf_getnote(src, &off, "CORE", NT_TLS,
+				    (void **)&tls, sizeof(prsavetls_t));
 		if (error)
 			goto done;
 	}
@@ -699,6 +715,7 @@ ckpt_freeze_proc(struct lwp *lp, struct file *fp)
 		while (p->p_nstopped < p->p_nthreads - 1)
 			tsleep(&p->p_nstopped, 0, "freeze", 1);
 		error = generic_elf_coredump(lp, SIGCKPT, fp, limit);
+PRINTF(("xxx: generic_elf_coredump returned: %d\n", error));
 		proc_unstop(p);
 	} else {
 		error = ERANGE;

@@ -1029,6 +1029,7 @@ generic_elf_coredump(struct lwp *lp, int sig, struct file *fp, off_t limit)
 		for (i = 0; i < seginfo.count; i++) {
 			error = fp_write(fp, (caddr_t)php->p_vaddr,
 					php->p_filesz, &nbytes, UIO_USERSPACE);
+			kprintf("xxx: generic_elf_coredump: did fp_write: %d\n", error);
 			if (error != 0)
 				break;
 			php++;
@@ -1315,6 +1316,7 @@ __elfN(puthdr)(struct lwp *lp, elf_buf_t target, int sig, enum putmode mode,
 	phdr = target_reserve(target, (numsegs + 1) * sizeof(Elf_Phdr), &error);
 
 	noteoff = target->off;
+/* XXX SJG - why wouldn't error = 0 here? */
 	if (error == 0)
 		elf_putallnotes(lp, target, sig, mode);
 	notesz = target->off - noteoff;
@@ -1406,10 +1408,12 @@ elf_putallnotes(struct lwp *corelp, elf_buf_t target, int sig,
 		prstatus_t status;
 		prfpregset_t fpregs;
 		prpsinfo_t psinfo;
+		prsavetls_t tls;
 	} *tmpdata;
 	prstatus_t *status;
 	prfpregset_t *fpregs;
 	prpsinfo_t *psinfo;
+	prsavetls_t *tls;
 	struct lwp *lp;
 
 	/*
@@ -1420,11 +1424,13 @@ elf_putallnotes(struct lwp *corelp, elf_buf_t target, int sig,
 		status = &tmpdata->status;
 		fpregs = &tmpdata->fpregs;
 		psinfo = &tmpdata->psinfo;
+		tls = &tmpdata->tls;
 	} else {
 		tmpdata = NULL;
 		status = NULL;
 		fpregs = NULL;
 		psinfo = NULL;
+		tls = NULL;
 	}
 
 	/*
@@ -1466,6 +1472,9 @@ elf_putallnotes(struct lwp *corelp, elf_buf_t target, int sig,
 		status->pr_pid = corelp->lwp_tid;
 		fill_regs(corelp, &status->pr_reg);
 		fill_fpregs(corelp, fpregs);
+// XXX SJG	fill_segdescrs(corelp, segdescrs);
+kprintf("xxx - saving out tls data for first thread\n");
+bcopy(&corelp->lwp_thread->td_tls, tls, sizeof *tls);
 	}
 	error =
 	    __elfN(putnote)(target, "CORE", NT_PRSTATUS, status, sizeof *status);
@@ -1473,6 +1482,10 @@ elf_putallnotes(struct lwp *corelp, elf_buf_t target, int sig,
 		goto exit;
 	error =
 	    __elfN(putnote)(target, "CORE", NT_FPREGSET, fpregs, sizeof *fpregs);
+	if (error)
+		goto exit;
+	error =
+	    __elfN(putnote)(target, "CORE", NT_TLS, tls, sizeof *tls);
 	if (error)
 		goto exit;
 
@@ -1489,6 +1502,9 @@ elf_putallnotes(struct lwp *corelp, elf_buf_t target, int sig,
 			status->pr_pid = lp->lwp_tid;
 			fill_regs(lp, &status->pr_reg);
 			fill_fpregs(lp, fpregs);
+// XXX SJG
+kprintf("xxx - saving out tls data for another thread\n");
+bcopy(&lp->lwp_thread->td_tls, tls, sizeof *tls);
 		}
 		error = __elfN(putnote)(target, "CORE", NT_PRSTATUS,
 					status, sizeof *status);
@@ -1496,6 +1512,10 @@ elf_putallnotes(struct lwp *corelp, elf_buf_t target, int sig,
 			goto exit;
 		error = __elfN(putnote)(target, "CORE", NT_FPREGSET,
 					fpregs, sizeof *fpregs);
+		if (error)
+			goto exit;
+		error = __elfN(putnote)(target, "CORE", NT_TLS,
+					tls, sizeof *tls);
 		if (error)
 			goto exit;
 	}

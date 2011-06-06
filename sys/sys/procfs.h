@@ -33,6 +33,8 @@
 #include <sys/param.h>
 #include <sys/reg.h>
 
+#include <machine/segments.h>
+
 typedef struct reg gregset_t;
 typedef struct fpreg fpregset_t;
 
@@ -68,6 +70,7 @@ typedef struct prstatus {
 
 typedef gregset_t prgregset_t[1];
 typedef fpregset_t prfpregset_t;
+typedef struct savetls prsavetls_t;
 
 #define PRARGSZ		80	/* Maximum argument bytes saved */
 
