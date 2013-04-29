@@ -4531,6 +4531,23 @@ pmap_setlwpvm(struct lwp *lp, struct vmspace *newvm)
 	}
 }
 
+void
+pmap_reloadvm(void)
+{
+	struct pmap *pmap;
+
+	crit_enter();
+	pmap = vmspace_pmap(curthread->td_proc->p_vmspace);
+#if defined(SWTCH_OPTIM_STATS)
+	tlb_flush_count++;
+#endif
+	curthread->td_pcb->pcb_cr3 = vtophys(pmap->pm_pml4);
+	curthread->td_pcb->pcb_cr3 |= PG_RW | PG_U | PG_V;
+	load_cr3(curthread->td_pcb->pcb_cr3);
+
+	crit_exit();
+}
+
 /*
  * Called when switching to a locked pmap, used to interlock against pmaps
  * undergoing modifications to prevent us from activating the MMU for the

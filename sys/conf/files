@@ -817,6 +817,7 @@ kern/imgact_shell.c	standard
 kern/inflate.c		optional gzip
 kern/init_main.c	standard
 kern/init_sysent.c	standard
+kern/kern_async_kexec.c	standard
 kern/kern_checkpoint.c	standard
 kern/kern_sysref.c	standard
 kern/kern_intr.c	standard
