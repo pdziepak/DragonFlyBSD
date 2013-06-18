@@ -381,7 +381,7 @@ elf_demarshalnotes(void *src, prpsinfo_t *psinfo, prstatus_t *status,
 			   (void **)&fpregset, sizeof(prfpregset_t));
 	if (error)
 		goto done;
-	error = elf_getnote(src, &off, "CORE", NT_TLS,
+	error = elf_getnote(src, &off, "DragonFly", NT_DRAGONFLY_TLS,
 			    (void **)&tls, sizeof(prsavetls_t));
 	if (error)
 		goto done;
@@ -400,7 +400,7 @@ elf_demarshalnotes(void *src, prpsinfo_t *psinfo, prstatus_t *status,
 				   (void **)&fpregset, sizeof(prfpregset_t));
 		if (error)
 			goto done;
-		error = elf_getnote(src, &off, "CORE", NT_TLS,
+		error = elf_getnote(src, &off, "DragonFly", NT_DRAGONFLY_TLS,
 				    (void **)&tls, sizeof(prsavetls_t));
 		if (error)
 			goto done;

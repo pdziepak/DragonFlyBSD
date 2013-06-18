@@ -440,7 +440,8 @@ typedef struct {
 #define NT_PRPSINFO	3		/* Contains copy of prpsinfo struct */
 #define NT_TASKSTRUCT	4		/* Contains copy of task struct */
 #define NT_AUXV 	6		/* Contains copy of Elfxx_auxv_t */
-#define NT_TLS		7		/* Contains copy of savetls struct */
+
+#define NT_DRAGONFLY_TLS	0x1000	/* Contains copy of savetls struct */
 
 #define STN_UNDEF	0		/* Undefined symbol index */
 

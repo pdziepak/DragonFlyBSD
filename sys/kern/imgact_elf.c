@@ -1485,7 +1485,8 @@ bcopy(&corelp->lwp_thread->td_tls, tls, sizeof *tls);
 	if (error)
 		goto exit;
 	error =
-	    __elfN(putnote)(target, "CORE", NT_TLS, tls, sizeof *tls);
+	    __elfN(putnote)(target, "DragonFly", NT_DRAGONFLY_TLS, tls,
+			sizeof *tls);
 	if (error)
 		goto exit;
 
@@ -1514,7 +1515,7 @@ bcopy(&lp->lwp_thread->td_tls, tls, sizeof *tls);
 					fpregs, sizeof *fpregs);
 		if (error)
 			goto exit;
-		error = __elfN(putnote)(target, "CORE", NT_TLS,
+		error = __elfN(putnote)(target, "DragonFly", NT_DRAGONFLY_TLS,
 					tls, sizeof *tls);
 		if (error)
 			goto exit;
