@@ -392,16 +392,16 @@ elf_demarshalnotes(void *src, prpsinfo_t *psinfo, prstatus_t *status,
 	if (error)
 		goto done;
 	error = elf_getnote(src, &off, "DragonFly", NT_DRAGONFLY_TLS,
-			    (void **)&tls, sizeof(prsavetls_t));
+			   (void **)&tls, sizeof(prsavetls_t));
 	if (error)
 		goto done;
 
 	/*
 	 * The remaining portion needs to be an integer multiple
-	 * of prstatus_t and prfpregset_t
+	 * of prstatus_t, prfpregset_t and prsavetls_t
 	 */
 	for (i = 0 ; i < nthreads - 1; i++) {
-		status++; fpregset++;
+		status++; fpregset++; tls++;
 		error = elf_getnote(src, &off, "CORE", NT_PRSTATUS,
 				   (void **)&status, sizeof (prstatus_t));
 		if (error)
@@ -411,7 +411,7 @@ elf_demarshalnotes(void *src, prpsinfo_t *psinfo, prstatus_t *status,
 		if (error)
 			goto done;
 		error = elf_getnote(src, &off, "DragonFly", NT_DRAGONFLY_TLS,
-				    (void **)&tls, sizeof(prsavetls_t));
+				   (void **)&tls, sizeof(prsavetls_t));
 		if (error)
 			goto done;
 	}
