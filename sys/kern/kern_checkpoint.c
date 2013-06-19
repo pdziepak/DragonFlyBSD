@@ -188,10 +188,10 @@ elf_getnotes(struct lwp *lp, struct file *fp, size_t notesz)
 	int dfly_note_hdr;
 
 	core_note_hdr
-		= sizeof(Elf_Note) + roundup2(strlen("CORE") + 1, sizeof(Elf_Size));
+		= sizeof(Elf_Note) + roundup2(strlen("CORE") + 1, sizeof(Elf_Word));
 	dfly_note_hdr
 		= sizeof(Elf_Note) + roundup2(strlen("DragonFly") + 1,
-			sizeof(Elf_Size));
+			sizeof(Elf_Word));
 
 	nthreads = notesz - sizeof(prpsinfo_t) - core_note_hdr;
 	nthreads /= sizeof(prstatus_t) + sizeof(prfpregset_t) + core_note_hdr * 2 +
@@ -355,7 +355,7 @@ elf_getnote(void *src, size_t *off, const char *name, unsigned int type,
 		error = EINVAL;
 		goto done;
 	}
-	*off += roundup2(note.n_namesz, sizeof(Elf_Size));
+	*off += roundup2(note.n_namesz, sizeof(Elf_Word));
 	if (note.n_descsz != descsz) {
 		TRACE_ERR;
 		error = EINVAL;
@@ -363,7 +363,7 @@ elf_getnote(void *src, size_t *off, const char *name, unsigned int type,
 	}
 	if (desc)
 	        bcopy((char *)src + *off, *desc, note.n_descsz);
-	*off += roundup2(note.n_descsz, sizeof(Elf_Size));
+	*off += roundup2(note.n_descsz, sizeof(Elf_Word));
 	error = 0;
  done:
 	TRACE_EXIT;
