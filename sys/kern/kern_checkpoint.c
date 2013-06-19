@@ -725,7 +725,6 @@ ckpt_freeze_proc(struct lwp *lp, struct file *fp)
 		while (p->p_nstopped < p->p_nthreads - 1)
 			tsleep(&p->p_nstopped, 0, "freeze", 1);
 		error = generic_elf_coredump(lp, SIGCKPT, fp, limit);
-PRINTF(("xxx: generic_elf_coredump returned: %d\n", error));
 		proc_unstop(p);
 	} else {
 		error = ERANGE;

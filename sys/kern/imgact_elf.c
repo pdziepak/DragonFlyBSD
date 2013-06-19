@@ -1029,7 +1029,6 @@ generic_elf_coredump(struct lwp *lp, int sig, struct file *fp, off_t limit)
 		for (i = 0; i < seginfo.count; i++) {
 			error = fp_write(fp, (caddr_t)php->p_vaddr,
 					php->p_filesz, &nbytes, UIO_USERSPACE);
-			kprintf("xxx: generic_elf_coredump: did fp_write: %d\n", error);
 			if (error != 0)
 				break;
 			php++;
@@ -1316,7 +1315,6 @@ __elfN(puthdr)(struct lwp *lp, elf_buf_t target, int sig, enum putmode mode,
 	phdr = target_reserve(target, (numsegs + 1) * sizeof(Elf_Phdr), &error);
 
 	noteoff = target->off;
-/* XXX SJG - why wouldn't error = 0 here? */
 	if (error == 0)
 		elf_putallnotes(lp, target, sig, mode);
 	notesz = target->off - noteoff;
