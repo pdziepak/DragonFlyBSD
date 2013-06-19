@@ -184,9 +184,19 @@ elf_getnotes(struct lwp *lp, struct file *fp, size_t notesz)
 	prstatus_t *status;
 	prfpregset_t *fpregset;
 	prsavetls_t *tls;
+	int core_note_hdr;
+	int dfly_note_hdr;
 
-	nthreads = (notesz - sizeof(prpsinfo_t))/(sizeof(prstatus_t) + 
-						  sizeof(prfpregset_t));
+	core_note_hdr
+		= sizeof(Elf_Note) + roundup2(strlen("CORE") + 1, sizeof(Elf_Size));
+	dfly_note_hdr
+		= sizeof(Elf_Note) + roundup2(strlen("DragonFly") + 1,
+			sizeof(Elf_Size));
+
+	nthreads = notesz - sizeof(prpsinfo_t) - core_note_hdr;
+	nthreads /= sizeof(prstatus_t) + sizeof(prfpregset_t) + core_note_hdr * 2 +
+		sizeof(prsavetls_t) + dfly_note_hdr;
+
 	PRINTF(("reading notes header nthreads=%d\n", nthreads));
 	if (nthreads <= 0 || nthreads > CKPT_MAXTHREADS)
 		return EINVAL;
