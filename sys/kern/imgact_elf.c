@@ -50,6 +50,7 @@
 #include <sys/syscall.h>
 #include <sys/sysctl.h>
 #include <sys/sysent.h>
+#include <sys/tls.h>
 #include <sys/vnode.h>
 #include <sys/eventhandler.h>
 
@@ -1470,9 +1471,7 @@ elf_putallnotes(struct lwp *corelp, elf_buf_t target, int sig,
 		status->pr_pid = corelp->lwp_tid;
 		fill_regs(corelp, &status->pr_reg);
 		fill_fpregs(corelp, fpregs);
-// XXX SJG	fill_segdescrs(corelp, segdescrs);
-kprintf("xxx - saving out tls data for first thread\n");
-bcopy(&corelp->lwp_thread->td_tls, tls, sizeof *tls);
+		fill_savetls(corelp, tls);
 	}
 	error =
 	    __elfN(putnote)(target, "CORE", NT_PRSTATUS, status, sizeof *status);
@@ -1501,9 +1500,7 @@ bcopy(&corelp->lwp_thread->td_tls, tls, sizeof *tls);
 			status->pr_pid = lp->lwp_tid;
 			fill_regs(lp, &status->pr_reg);
 			fill_fpregs(lp, fpregs);
-// XXX SJG
-kprintf("xxx - saving out tls data for another thread\n");
-bcopy(&lp->lwp_thread->td_tls, tls, sizeof *tls);
+			fill_savetls(lp, tls);
 		}
 		error = __elfN(putnote)(target, "CORE", NT_PRSTATUS,
 					status, sizeof *status);

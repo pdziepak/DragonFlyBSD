@@ -180,3 +180,46 @@ set_user_TLS(void)
 	crit_exit_quick(td);
 }
 
+/*
+ * Save TLS descriptors.
+ *
+ * Save all TLS descriptors so that they can be later restored by set_savetls().
+ *
+ * MPSAFE
+ */
+int
+fill_savetls(struct lwp *lp, struct savetls *tls)
+{
+	bcopy(&lp->lwp_thread->td_tls, tls, sizeof *tls);
+	return (0);
+}
+
+/*
+ * Restore TLS descriptors.
+ *
+ * Restore TLS descriptors previously saved using fill_savetls(). set_user_TLS()
+ * is called for the current thread since, contrary to the thread switch,
+ * syscall exit routines does not fully reinstall the TLS. Otherwise, it is
+ * sufficient to update the PCB.
+ *
+ * MPSAFE
+ */
+int
+set_savetls(struct lwp *lp, struct savetls *tls)
+{
+	thread_t td = lp->lwp_thread;
+	int error;
+
+	error = cpu_sanitize_tls(tls);
+	if (error)
+		return (error);
+	bcopy(tls, &td->td_tls, sizeof *tls);
+	if (curthread->td_lwp == lp)
+		set_user_TLS();
+	else {
+		td->td_pcb->pcb_fsbase = (register_t)td->td_tls.info[0].base;
+		td->td_pcb->pcb_gsbase = (register_t)td->td_tls.info[1].base;
+	}
+
+	return (0);
+}

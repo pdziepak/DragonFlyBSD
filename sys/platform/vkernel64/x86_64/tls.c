@@ -145,3 +145,35 @@ void
 set_user_TLS(void)
 {
 }
+
+/*
+ * Save TLS descriptors.
+ *
+ * Save all TLS descriptors so that they can be later restored by set_savetls().
+ *
+ * MPSAFE
+ */
+int
+fill_savetls(struct lwp *lp, struct savetls *tls)
+{
+	bcopy(&lp->lwp_thread->td_tls, tls, sizeof *tls);
+	return (0);
+}
+
+/*
+ * Restore TLS descriptors.
+ *
+ * Restore TLS descriptors previously saved using fill_savetls().
+ * MPSAFE
+ */
+int
+set_savetls(struct lwp *lp, struct savetls *tls)
+{
+	int error;
+
+	error = cpu_sanitize_tls(tls);
+	if (error)
+		return (error);
+	bcopy(tls, &lp->lwp_thread->td_tls, sizeof *tls);
+	return (0);
+}

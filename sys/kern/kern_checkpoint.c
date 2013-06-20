@@ -64,6 +64,7 @@
 #include <sys/exec.h>
 #include <sys/unistd.h>
 #include <sys/time.h>
+#include <sys/tls.h>
 #include <sys/kern_syscall.h>
 #include <sys/checkpoint.h>
 #include <sys/mount.h>
@@ -230,6 +231,7 @@ elf_getnotes(struct lwp *lp, struct file *fp, size_t notesz)
 	return error;
 }
 
+
 static int
 ckpt_thaw_proc(struct lwp *lp, struct file *fp)
 {
@@ -287,6 +289,7 @@ ckpt_thaw_proc(struct lwp *lp, struct file *fp)
 		vsetflags(p->p_textvp, VCKPT);
 		vref(p->p_textvp);
 	}
+
 done:
 	if (ehdr)
 		kfree(ehdr, M_TEMP);
@@ -318,10 +321,10 @@ elf_loadnotes(struct lwp *lp, prpsinfo_t *psinfo, prstatus_t *status,
 	/* XXX lwp handle more than one lwp*/
 	if ((error = set_regs(lp, &status->pr_reg)) != 0)
 		goto done;
-	error = set_fpregs(lp, fpregset);
-/* XXX SJG */
-kprintf("xxx: restoring TLS-fu\n");
-bcopy(tls, &lp->lwp_thread->td_tls, sizeof *tls);
+	if ((error = set_fpregs(lp, fpregset)) != 0)
+		goto done;
+	error = set_savetls(lp, tls);
+
 	strlcpy(p->p_comm, psinfo->pr_fname, sizeof(p->p_comm));
 	/* XXX psinfo->pr_psargs not yet implemented */
  done:	

@@ -44,6 +44,16 @@ struct tls_info {
 int set_tls_area(int which, struct tls_info *info, size_t infosize);
 int get_tls_area(int which, struct tls_info *info, size_t infosize);
 
+#ifdef _KERNEL
+
+struct lwp;
+struct savetls;
+
+int fill_savetls(struct lwp *lp, struct savetls *tls);
+int set_savetls(struct lwp *lp, struct savetls *tls);
+
+#endif
+
 #ifdef __x86_64__
 
 #define TLS_WHICH_FS	0
