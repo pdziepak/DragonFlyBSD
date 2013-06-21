@@ -80,8 +80,6 @@ struct forklist {
 TAILQ_HEAD(forklist_head, forklist);
 static struct forklist_head fork_list = TAILQ_HEAD_INITIALIZER(fork_list);
 
-static struct lwp *lwp_fork(struct lwp *, struct proc *, int flags);
-
 int forksleep; /* Place for fork1() to sleep on. */
 
 /*
@@ -627,7 +625,7 @@ done:
 	return (error);
 }
 
-static struct lwp *
+struct lwp *
 lwp_fork(struct lwp *origlp, struct proc *destproc, int flags)
 {
 	globaldata_t gd = mycpu;
