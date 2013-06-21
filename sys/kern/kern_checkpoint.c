@@ -41,6 +41,7 @@
 #include <sys/imgact_elf.h>
 #include <sys/procfs.h>
 
+#include <sys/dsched.h>
 #include <sys/lock.h>
 #include <vm/pmap.h>
 #include <vm/vm_map.h>
@@ -74,12 +75,16 @@
 #include <sys/file2.h>
 
 static int elf_loadphdrs(struct file *fp,  Elf_Phdr *phdr, int numsegs);
-static int elf_getnotes(struct lwp *lp, struct file *fp, size_t notesz);
+static int elf_getnotes(struct lwp *lp, struct file *fp, size_t notesz,
+		 prstatus_t **_status, prfpregset_t **_fpregset, prsavetls_t **_tls,
+		 int *_nthreads);
 static int elf_demarshalnotes(void *src, prpsinfo_t *psinfo,
 		 prstatus_t *status, prfpregset_t *fpregset, prsavetls_t *tls,
 		 int nthreads);
 static int elf_loadnotes(struct lwp *, prpsinfo_t *, prstatus_t *,
 		 prfpregset_t *, prsavetls_t *);
+static int elf_recreatelwps(struct lwp *mainlp, prstatus_t *status,
+		 prfpregset_t *fpregset, prsavetls_t *tls, int nthreads);
 static int elf_getsigs(struct lwp *lp, struct file *fp);
 static int elf_getfiles(struct lwp *lp, struct file *fp);
 static int elf_gettextvp(struct proc *p, struct file *fp);
@@ -176,7 +181,9 @@ elf_getphdrs(struct file *fp, Elf_Phdr *phdr, size_t nbyte)
 
 
 static int
-elf_getnotes(struct lwp *lp, struct file *fp, size_t notesz)
+elf_getnotes(struct lwp *lp, struct file *fp, size_t notesz,
+	prstatus_t **_status, prfpregset_t **_fpregset, prsavetls_t **_tls,
+	int *_nthreads)
 {
 	int error;
 	int nthreads;
@@ -217,17 +224,80 @@ elf_getnotes(struct lwp *lp, struct file *fp, size_t notesz)
 		goto done;
 	/* fetch register state from notes */
 	error = elf_loadnotes(lp, psinfo, status, fpregset, tls);
+
+	*_status = status;
+	*_fpregset = fpregset;
+	*_tls = tls;
+	*_nthreads = nthreads;
  done:
 	if (psinfo)
 		kfree(psinfo, M_TEMP);
-	if (status)
-		kfree(status, M_TEMP);
-	if (fpregset)
-		kfree(fpregset, M_TEMP);
-	if (tls)
-		kfree(tls, M_TEMP);
 	if (note)
 		kfree(note, M_TEMP);
+	return error;
+}
+
+
+
+static int
+elf_recreatelwps(struct lwp *mainlp, prstatus_t *status, prfpregset_t *fpregset,
+	prsavetls_t *tls, int nthreads)
+{
+	struct proc *p = mainlp->lwp_proc;
+	struct lwp *lp;
+	int error = 0;
+	int i;
+
+	TRACE_ENTER;
+
+	lwkt_gettoken(&p->p_token);
+	plimit_lwp_fork(p);
+	for (i = 1; i < nthreads; i++) {
+		status++; fpregset++; tls++;
+		lp = lwp_fork(mainlp, mainlp->lwp_proc, RFPROC);
+		if ((error = set_regs(lp, &status->pr_reg)) != 0)
+			goto fail;
+		if ((error = set_fpregs(lp, fpregset)) != 0)
+			goto fail;
+		if ((error = set_savetls(lp, tls)) != 0)
+			goto fail;
+	}
+
+	FOREACH_LWP_IN_PROC(lp, p) {
+		if (lp == mainlp)
+			continue;
+
+		p->p_usched->resetpriority(lp);
+		crit_enter();
+		lp->lwp_stat = LSRUN;
+		p->p_usched->setrunqueue(lp);
+		crit_exit();
+	}
+	lwkt_reltoken(&p->p_token);
+
+	TRACE_EXIT;
+	return 0;
+
+fail:
+	FOREACH_LWP_IN_PROC(lp, p) {
+		if (lp == mainlp)
+			continue;
+
+		lwp_rb_tree_RB_REMOVE(&p->p_lwp_tree, lp);
+		--p->p_nthreads;
+		/* lwp_dispose expects an exited lwp, and a held proc */
+		atomic_set_int(&lp->lwp_mpflags, LWP_MP_WEXIT);
+		lp->lwp_thread->td_flags |= TDF_EXITING;
+		lwkt_remove_tdallq(lp->lwp_thread);
+		PHOLD(p);
+		biosched_done(lp->lwp_thread);
+		dsched_exit_thread(lp->lwp_thread);
+		lwp_dispose(lp);
+	}
+
+	lwkt_reltoken(&p->p_token);
+
+	TRACE_EXIT;
 	return error;
 }
 
@@ -240,6 +310,10 @@ ckpt_thaw_proc(struct lwp *lp, struct file *fp)
 	Elf_Ehdr *ehdr = NULL;
 	int error;
 	size_t nbyte;
+	prstatus_t *status = NULL;
+	prfpregset_t *fpregset = NULL;
+	prsavetls_t *tls = NULL;
+	int nthreads = 0;
 
 	TRACE_ENTER;
 	
@@ -254,8 +328,10 @@ ckpt_thaw_proc(struct lwp *lp, struct file *fp)
 	if ((error = elf_getphdrs(fp, phdr, nbyte)) != 0)
 		goto done;
 
-	/* fetch notes section containing register state */
-	if ((error = elf_getnotes(lp, fp, phdr->p_filesz)) != 0)
+	/* fetch notes section containing register states and TLS */
+	error = elf_getnotes(lp, fp, phdr->p_filesz, &status, &fpregset, &tls,
+		&nthreads);
+	if (error != 0)
 		goto done;
 
 	/* fetch program text vnodes */
@@ -274,6 +350,11 @@ ckpt_thaw_proc(struct lwp *lp, struct file *fp)
 
 	/* handle mappings last in case we are reading from a socket */
 	error = elf_loadphdrs(fp, phdr, ehdr->e_phnum);
+	if (error != 0)
+		goto done;
+
+	/* recreate lwps */
+	error = elf_recreatelwps(lp, status, fpregset, tls, nthreads);
 
 	/*
 	 * Set the textvp to the checkpoint file and mark the vnode so
@@ -291,6 +372,12 @@ ckpt_thaw_proc(struct lwp *lp, struct file *fp)
 	}
 
 done:
+	if (status)
+		kfree(status, M_TEMP);
+	if (fpregset)
+		kfree(fpregset, M_TEMP);
+	if (tls)
+		kfree(tls, M_TEMP);
 	if (ehdr)
 		kfree(ehdr, M_TEMP);
 	if (phdr)
@@ -318,7 +405,7 @@ elf_loadnotes(struct lwp *lp, prpsinfo_t *psinfo, prstatus_t *status,
 		error = EINVAL;
 		goto done;
 	}
-	/* XXX lwp handle more than one lwp*/
+
 	if ((error = set_regs(lp, &status->pr_reg)) != 0)
 		goto done;
 	if ((error = set_fpregs(lp, fpregset)) != 0)
