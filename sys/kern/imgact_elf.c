@@ -1556,19 +1556,32 @@ __elfN(putnote)(elf_buf_t target, const char *name, int type,
 static int
 elf_putsigs(struct lwp *lp, elf_buf_t target)
 {
-	/* XXX lwp handle more than one lwp */
 	struct proc *p = lp->lwp_proc;
 	int error = 0;
 	struct ckpt_siginfo *csi;
+	int i = 1;
+	struct lwp *otherlp;
 
-	csi = target_reserve(target, sizeof(struct ckpt_siginfo), &error);
+	csi = target_reserve(target, sizeof(struct ckpt_siginfo)
+		+ (p->p_nthreads - 1) * sizeof(struct ckpt_lwpsiginfo), &error);
 	if (csi) {
 		csi->csi_ckptpisz = sizeof(struct ckpt_siginfo);
 		bcopy(p->p_sigacts, &csi->csi_sigacts, sizeof(*p->p_sigacts));
 		bcopy(&p->p_realtimer, &csi->csi_itimerval, sizeof(struct itimerval));
-		bcopy(&lp->lwp_sigmask, &csi->csi_sigmask,
-			sizeof(sigset_t));
 		csi->csi_sigparent = p->p_sigparent;
+
+		bcopy(&lp->lwp_sigmask, &csi->csi_lwpinfo->clsi_sigmask,
+			sizeof(sigset_t));
+		bcopy(&lp->lwp_sigstk, &csi->csi_lwpinfo->clsi_sigstk, sizeof(stack_t));
+		FOREACH_LWP_IN_PROC(otherlp, p) {
+			if (otherlp == lp)
+				continue;
+
+			bcopy(&otherlp->lwp_sigmask, &csi->csi_lwpinfo[i++].clsi_sigmask,
+				sizeof(sigset_t));
+			bcopy(&otherlp->lwp_sigstk, &csi->csi_lwpinfo[i++].clsi_sigstk,
+				sizeof(stack_t));
+		}
 	}
 	return (error);
 }

@@ -592,11 +592,35 @@ sys_sigsuspend(struct sigsuspend_args *uap)
  * MPSAFE
  */
 int
+set_signalstack(struct lwp *lp, struct sigaltstack *ss)
+{
+	struct proc *p = lp->lwp_proc;
+
+	if (ss->ss_flags & ~SS_DISABLE)
+		return (EINVAL);
+	if (ss->ss_flags & SS_DISABLE) {
+		if (lp->lwp_sigstk.ss_flags & SS_ONSTACK)
+			return (EINVAL);
+		lp->lwp_flags &= ~LWP_ALTSTACK;
+		lp->lwp_sigstk.ss_flags = ss->ss_flags;
+	} else {
+		if (ss->ss_size < p->p_sysent->sv_minsigstksz)
+			return (ENOMEM);
+		lp->lwp_flags |= LWP_ALTSTACK;
+		lp->lwp_sigstk = *ss;
+	}
+
+	return (0);
+}
+
+/*
+ * MPSAFE
+ */
+int
 kern_sigaltstack(struct sigaltstack *ss, struct sigaltstack *oss)
 {
-	struct thread *td = curthread;
-	struct lwp *lp = td->td_lwp;
-	struct proc *p = td->td_proc;
+	struct lwp *lp = curthread->td_lwp;
+	int error = 0;
 
 	if ((lp->lwp_flags & LWP_ALTSTACK) == 0)
 		lp->lwp_sigstk.ss_flags |= SS_DISABLE;
@@ -604,23 +628,10 @@ kern_sigaltstack(struct sigaltstack *ss, struct sigaltstack *oss)
 	if (oss)
 		*oss = lp->lwp_sigstk;
 
-	if (ss) {
-		if (ss->ss_flags & ~SS_DISABLE)
-			return (EINVAL);
-		if (ss->ss_flags & SS_DISABLE) {
-			if (lp->lwp_sigstk.ss_flags & SS_ONSTACK)
-				return (EINVAL);
-			lp->lwp_flags &= ~LWP_ALTSTACK;
-			lp->lwp_sigstk.ss_flags = ss->ss_flags;
-		} else {
-			if (ss->ss_size < p->p_sysent->sv_minsigstksz)
-				return (ENOMEM);
-			lp->lwp_flags |= LWP_ALTSTACK;
-			lp->lwp_sigstk = *ss;
-		}
-	}
+	if (ss)
+		error = set_signalstack(lp, ss);
 
-	return (0);
+	return (error);
 }
 
 /*

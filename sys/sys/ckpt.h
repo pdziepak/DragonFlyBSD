@@ -75,13 +75,17 @@ struct ckpt_fileinfo {
 
 #define CKFIF_ISCKPTFD	0x0001
 
+struct ckpt_lwpsiginfo {
+	sigset_t	clsi_sigmask;
+	stack_t		clsi_sigstk;
+};
+
 struct ckpt_siginfo {
 	int		csi_ckptpisz;
 	struct sigacts	csi_sigacts;
 	struct itimerval csi_itimerval;
 	int		csi_sigparent;
-	sigset_t	csi_sigmask;
-	int		csi_reserved[6];
+	struct ckpt_lwpsiginfo	csi_lwpinfo[1];
 };
 
 /*

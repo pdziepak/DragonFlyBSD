@@ -84,8 +84,10 @@ static int elf_demarshalnotes(void *src, prpsinfo_t *psinfo,
 static int elf_loadnotes(struct lwp *, prpsinfo_t *, prstatus_t *,
 		 prfpregset_t *, prsavetls_t *);
 static int elf_recreatelwps(struct lwp *mainlp, prstatus_t *status,
-		 prfpregset_t *fpregset, prsavetls_t *tls, int nthreads);
-static int elf_getsigs(struct lwp *lp, struct file *fp);
+		 prfpregset_t *fpregset, prsavetls_t *tls,
+		 struct ckpt_lwpsiginfo *siginfo, int nthreads);
+static int elf_getsigs(struct lwp *lp, struct file *fp, int nthreads,
+		 struct ckpt_lwpsiginfo **siginfo);
 static int elf_getfiles(struct lwp *lp, struct file *fp);
 static int elf_gettextvp(struct proc *p, struct file *fp);
 static char *ckpt_expand_name(const char *name, uid_t uid, pid_t pid);
@@ -237,11 +239,9 @@ elf_getnotes(struct lwp *lp, struct file *fp, size_t notesz,
 	return error;
 }
 
-
-
 static int
 elf_recreatelwps(struct lwp *mainlp, prstatus_t *status, prfpregset_t *fpregset,
-	prsavetls_t *tls, int nthreads)
+	prsavetls_t *tls, struct ckpt_lwpsiginfo *siginfo, int nthreads)
 {
 	struct proc *p = mainlp->lwp_proc;
 	struct lwp *lp;
@@ -253,7 +253,7 @@ elf_recreatelwps(struct lwp *mainlp, prstatus_t *status, prfpregset_t *fpregset,
 	lwkt_gettoken(&p->p_token);
 	plimit_lwp_fork(p);
 	for (i = 1; i < nthreads; i++) {
-		status++; fpregset++; tls++;
+		status++; fpregset++; tls++; siginfo++;
 		lp = lwp_fork(mainlp, mainlp->lwp_proc, RFPROC);
 		if ((error = set_regs(lp, &status->pr_reg)) != 0)
 			goto fail;
@@ -261,6 +261,10 @@ elf_recreatelwps(struct lwp *mainlp, prstatus_t *status, prfpregset_t *fpregset,
 			goto fail;
 		if ((error = set_savetls(lp, tls)) != 0)
 			goto fail;
+
+		SIG_CANTMASK(siginfo->clsi_sigmask);
+		bcopy(&siginfo->clsi_sigmask, &lp->lwp_sigmask, sizeof(sigset_t));
+		set_signalstack(lp, &siginfo->clsi_sigstk);
 	}
 
 	FOREACH_LWP_IN_PROC(lp, p) {
@@ -313,6 +317,7 @@ ckpt_thaw_proc(struct lwp *lp, struct file *fp)
 	prstatus_t *status = NULL;
 	prfpregset_t *fpregset = NULL;
 	prsavetls_t *tls = NULL;
+	struct ckpt_lwpsiginfo *siginfo = NULL;
 	int nthreads = 0;
 
 	TRACE_ENTER;
@@ -339,7 +344,7 @@ ckpt_thaw_proc(struct lwp *lp, struct file *fp)
 		goto done;
 
 	/* fetch signal disposition */
-	if ((error = elf_getsigs(lp, fp)) != 0) {
+	if ((error = elf_getsigs(lp, fp, nthreads, &siginfo)) != 0) {
 		kprintf("failure in recovering signals\n");
 		goto done;
 	}
@@ -354,7 +359,7 @@ ckpt_thaw_proc(struct lwp *lp, struct file *fp)
 		goto done;
 
 	/* recreate lwps */
-	error = elf_recreatelwps(lp, status, fpregset, tls, nthreads);
+	error = elf_recreatelwps(lp, status, fpregset, tls, siginfo, nthreads);
 
 	/*
 	 * Set the textvp to the checkpoint file and mark the vnode so
@@ -378,6 +383,8 @@ done:
 		kfree(fpregset, M_TEMP);
 	if (tls)
 		kfree(tls, M_TEMP);
+	if (siginfo)
+		kfree(siginfo, M_TEMP);
 	if (ehdr)
 		kfree(ehdr, M_TEMP);
 	if (phdr)
@@ -563,15 +570,19 @@ elf_loadphdrs(struct file *fp, Elf_Phdr *phdr, int numsegs)
 }
 
 static int
-elf_getsigs(struct lwp *lp, struct file *fp) 
+elf_getsigs(struct lwp *lp, struct file *fp, int nthreads,
+	struct ckpt_lwpsiginfo** _siginfo) 
 {
 	struct proc *p = lp->lwp_proc;
 	int error;
 	struct ckpt_siginfo *csi;
+	size_t data_size;
+	struct ckpt_lwpsiginfo *siginfo;
 
 	TRACE_ENTER;
-	csi = kmalloc(sizeof(struct ckpt_siginfo), M_TEMP, M_ZERO | M_WAITOK);
-	if ((error = read_check(fp, csi, sizeof(struct ckpt_siginfo))) != 0)
+	data_size = sizeof(struct ckpt_siginfo) + (nthreads - 1) * sizeof(sigset_t);
+	csi = kmalloc(data_size, M_TEMP, M_ZERO | M_WAITOK);
+	if ((error = read_check(fp, csi, data_size)) != 0)
 		goto done;
 
 	if (csi->csi_ckptpisz != sizeof(struct ckpt_siginfo)) {
@@ -581,10 +592,18 @@ elf_getsigs(struct lwp *lp, struct file *fp)
 	}
 	bcopy(&csi->csi_sigacts, p->p_sigacts, sizeof(struct sigacts));
 	bcopy(&csi->csi_itimerval, &p->p_realtimer, sizeof(struct itimerval));
-	SIG_CANTMASK(csi->csi_sigmask);
-	/* XXX lwp handle more than one lwp */
-	bcopy(&csi->csi_sigmask, &lp->lwp_sigmask, sizeof(sigset_t));
 	p->p_sigparent = csi->csi_sigparent;
+
+	siginfo = kmalloc(sizeof(struct ckpt_lwpsiginfo) * nthreads, M_TEMP,
+		M_WAITOK);
+	bcopy(csi->csi_lwpinfo, siginfo, sizeof(struct ckpt_lwpsiginfo) * nthreads);
+
+	SIG_CANTMASK(siginfo->clsi_sigmask);
+	bcopy(&siginfo->clsi_sigmask, &lp->lwp_sigmask, sizeof(sigset_t));
+	set_signalstack(lp, &siginfo->clsi_sigstk);
+
+	*_siginfo = siginfo;
+
  done:
 	if (csi)
 		kfree(csi, M_TEMP);

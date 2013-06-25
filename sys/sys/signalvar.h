@@ -199,6 +199,7 @@ void	ksignal (struct proc *p, int sig);
 void	lwpsignal (struct proc *p, struct lwp *lp, int sig);
 void	siginit (struct proc *p);
 void	trapsignal (struct lwp *p, int sig, u_long code);
+int	set_signalstack (struct lwp *lp, struct sigaltstack *ss);
 
 /*
  * Machine-dependent functions:
