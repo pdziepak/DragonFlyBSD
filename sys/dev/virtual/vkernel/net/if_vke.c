@@ -122,7 +122,8 @@ static void	vke_start(struct ifnet *, struct ifaltq_subque *);
 static void	vke_init(void *);
 static int	vke_ioctl(struct ifnet *, u_long, caddr_t, struct ucred *);
 
-static int	vke_attach(const struct vknetif_info *, int);
+static int	vke_attach(struct vknetif_info *, int);
+void		vke_reattach(struct vknetif_info *info);
 static int	vke_stop(struct vke_softc *);
 static int	vke_init_addr(struct ifnet *, in_addr_t, in_addr_t);
 static void	vke_tx_intr(cothread_t cotd);
@@ -722,8 +723,30 @@ vke_tx_thread(cothread_t cotd)
 	sc->cotd_tx_exit = VKE_COTD_DEAD;
 }
 
+void
+vke_reattach(struct vknetif_info *info)
+{
+	struct tapinfo tapinfo;
+	struct ifnet *ifp = info->ifnet;
+	struct vke_softc *sc = (struct vke_softc *)ifp->if_softc;
+
+	/* tap unit might have changed */
+	sc->sc_tap_unit = info->tap_unit;
+	sc->sc_fd = info->tap_fd;
+
+	if (info->tap_unit >= 0) {
+		if (ioctl(info->tap_fd, TAPGIFINFO, &tapinfo) < 0) {
+			kprintf(VKE_DEVNAME "%d: ioctl(TAPGIFINFO) "
+				"failed: %s\n", sc->sc_unit, strerror(errno));
+		} else {
+			ifp->if_mtu = tapinfo.mtu;
+			ifp->if_baudrate = tapinfo.baudrate;
+		}
+	}
+}
+
 static int
-vke_attach(const struct vknetif_info *info, int unit)
+vke_attach(struct vknetif_info *info, int unit)
 {
 	struct vke_softc *sc;
 	struct ifnet *ifp;
@@ -838,6 +861,7 @@ vke_attach(const struct vknetif_info *info, int unit)
 		    ntohl(sc->sc_addr), ntohl(sc->sc_mask), sc->sc_ringsize);
 	}
 
+	info->ifnet = ifp;
 	return 0;
 }
 

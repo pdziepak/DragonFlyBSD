@@ -54,9 +54,13 @@
 struct vknetif_info {
 	int		tap_fd;
 	int		tap_unit;
+	in_addr_t	tap_addr;
+	char	*netif_name;
 	in_addr_t	netif_addr;
 	in_addr_t	netif_mask;
+	char	*ifbridge;
 	u_char		*enaddr;
+	struct ifnet	*ifnet;
 };
 
 struct vkdisk_info {
