@@ -78,11 +78,12 @@ static int elf_loadphdrs(struct file *fp,  Elf_Phdr *phdr, int numsegs);
 static int elf_getnotes(struct lwp *lp, struct file *fp, size_t notesz,
 		 prstatus_t **_status, prfpregset_t **_fpregset, prsavetls_t **_tls,
 		 int *_nthreads);
-static int elf_demarshalnotes(void *src, prpsinfo_t *psinfo,
-		 prstatus_t *status, prfpregset_t *fpregset, prsavetls_t *tls,
-		 int nthreads);
-static int elf_loadnotes(struct lwp *, prpsinfo_t *, prstatus_t *,
-		 prfpregset_t *, prsavetls_t *);
+static int elf_demarshalprocnotes(void *src, size_t *off, prpsinfo_t *psinfo);
+static int elf_loadprocnotes(struct lwp *lp, prpsinfo_t *psinfo, int *nthreads);
+static int elf_demarshallwpnotes(void *src, size_t *off, prstatus_t *status,
+		 prfpregset_t *fpregset, prsavetls_t *tls, int nthreads);
+static int elf_loadlwpnotes(struct lwp *, prstatus_t *, prfpregset_t *,
+		 prsavetls_t *);
 static int elf_recreatelwps(struct lwp *mainlp, prstatus_t *status,
 		 prfpregset_t *fpregset, prsavetls_t *tls, int nthreads);
 static int elf_getfiles(struct lwp *lp, struct file *fp);
@@ -187,42 +188,40 @@ elf_getnotes(struct lwp *lp, struct file *fp, size_t notesz,
 	int error;
 	int nthreads;
 	char *note;
+	size_t off = 0;
 	prpsinfo_t *psinfo;
 	prstatus_t *status;
 	prfpregset_t *fpregset;
 	prsavetls_t *tls;
-	int core_note_hdr;
-	int dfly_note_hdr;
-
-	core_note_hdr
-		= sizeof(Elf_Note) + roundup2(strlen("CORE") + 1, sizeof(Elf_Word));
-	dfly_note_hdr
-		= sizeof(Elf_Note) + roundup2(strlen("DragonFly") + 1,
-			sizeof(Elf_Word));
-
-	nthreads = notesz - sizeof(prpsinfo_t) - core_note_hdr;
-	nthreads /= sizeof(prstatus_t) + sizeof(prfpregset_t) + core_note_hdr * 2 +
-		sizeof(prsavetls_t) + dfly_note_hdr;
-
-	PRINTF(("reading notes header nthreads=%d\n", nthreads));
-	if (nthreads <= 0 || nthreads > CKPT_MAXTHREADS)
-		return EINVAL;
 
 	psinfo  = kmalloc(sizeof(prpsinfo_t), M_TEMP, M_ZERO | M_WAITOK);
-	status  = kmalloc(nthreads*sizeof(prstatus_t), M_TEMP, M_WAITOK);
-	fpregset  = kmalloc(nthreads*sizeof(prfpregset_t), M_TEMP, M_WAITOK);
-	tls	= kmalloc(nthreads*sizeof(prsavetls_t), M_TEMP, M_WAITOK);
 	note = kmalloc(notesz, M_TEMP, M_WAITOK);
 
-	
 	PRINTF(("reading notes section\n"));
 	if ((error = read_check(fp, note, notesz)) != 0)
 		goto done;
-	error = elf_demarshalnotes(note, psinfo, status, fpregset, tls, nthreads);
+	error = elf_demarshalprocnotes(note, &off, psinfo);
 	if (error)
 		goto done;
-	/* fetch register state from notes */
-	error = elf_loadnotes(lp, psinfo, status, fpregset, tls);
+	error = elf_loadprocnotes(lp, psinfo, &nthreads);
+	if (error)
+		goto done;
+
+	if (nthreads <= 0 || nthreads > CKPT_MAXTHREADS) {
+		error = EINVAL;
+		goto done;
+	}
+
+	status  = kmalloc(nthreads*sizeof(prstatus_t), M_TEMP, M_WAITOK);
+	fpregset  = kmalloc(nthreads*sizeof(prfpregset_t), M_TEMP, M_WAITOK);
+	tls	= kmalloc(nthreads*sizeof(prsavetls_t), M_TEMP, M_WAITOK);
+
+	error = elf_demarshallwpnotes(note, &off, status, fpregset, tls, nthreads);
+	if (error)
+		goto done;
+	error = elf_loadlwpnotes(lp, status, fpregset, tls);
+	if (error)
+		goto done;
 
 	*_status = status;
 	*_fpregset = fpregset;
@@ -252,16 +251,10 @@ elf_recreatelwps(struct lwp *mainlp, prstatus_t *status, prfpregset_t *fpregset,
 	for (i = 1; i < nthreads; i++) {
 		status++; fpregset++; tls++;
 		lp = lwp_fork(mainlp, mainlp->lwp_proc, RFPROC);
-		if ((error = set_regs(lp, &status->pr_reg)) != 0)
-			goto fail;
-		if ((error = set_fpregs(lp, fpregset)) != 0)
-			goto fail;
-		if ((error = set_savetls(lp, tls)) != 0)
-			goto fail;
 
-		SIG_CANTMASK(status->pr_sigmask);
-		bcopy(&status->pr_sigmask, &lp->lwp_sigmask, sizeof(sigset_t));
-		set_signalstack(lp, &status->pr_sigstk);
+		error = elf_loadlwpnotes(lp, status, fpregset, tls);
+		if (error)
+			goto fail;
 	}
 
 	FOREACH_LWP_IN_PROC(lp, p) {
@@ -382,20 +375,46 @@ done:
 }
 
 static int
-elf_loadnotes(struct lwp *lp, prpsinfo_t *psinfo, prstatus_t *status,
-	   prfpregset_t *fpregset, prsavetls_t *tls)
+elf_loadprocnotes(struct lwp *lp, prpsinfo_t *psinfo, int *nthreads)
 {
 	struct proc *p = lp->lwp_proc;
+	int error = 0;
+
+	/* validate psinfo */
+	TRACE_ENTER;
+	if (psinfo->pr_version != PRPSINFO_VERSION ||
+	    psinfo->pr_psinfosz != sizeof(prpsinfo_t)) {
+	        PRINTF(("psinfo check failed\n"));
+		error = EINVAL;
+		goto done;
+	}
+
+	strlcpy(p->p_comm, psinfo->pr_fname, sizeof(p->p_comm));
+	/* XXX psinfo->pr_psargs not yet implemented */
+
+	bcopy(&psinfo->pr_sigacts, p->p_sigacts, sizeof(struct sigacts));
+	bcopy(&psinfo->pr_itimerval, &p->p_realtimer, sizeof(struct itimerval));
+	p->p_sigparent = psinfo->pr_sigparent;
+
+	*nthreads = psinfo->pr_lwpcount;
+
+ done:	
+	TRACE_EXIT;
+	return error;
+}
+
+static int
+elf_loadlwpnotes(struct lwp *lp, prstatus_t *status, prfpregset_t *fpregset,
+	prsavetls_t *tls)
+{
 	int error;
 
-	/* validate status and psinfo */
+	/* validate status */
 	TRACE_ENTER;
 	if (status->pr_version != PRSTATUS_VERSION ||
 	    status->pr_statussz != sizeof(prstatus_t) ||
 	    status->pr_gregsetsz != sizeof(gregset_t) ||
-	    status->pr_fpregsetsz != sizeof(fpregset_t) ||
-	    psinfo->pr_version != PRPSINFO_VERSION ||
-	    psinfo->pr_psinfosz != sizeof(prpsinfo_t)) {
+	    status->pr_fpregsetsz != sizeof(fpregset_t)) {
 	        PRINTF(("status check failed\n"));
 		error = EINVAL;
 		goto done;
@@ -407,17 +426,9 @@ elf_loadnotes(struct lwp *lp, prpsinfo_t *psinfo, prstatus_t *status,
 		goto done;
 	error = set_savetls(lp, tls);
 
-	strlcpy(p->p_comm, psinfo->pr_fname, sizeof(p->p_comm));
-	/* XXX psinfo->pr_psargs not yet implemented */
-
-	bcopy(&psinfo->pr_sigacts, p->p_sigacts, sizeof(struct sigacts));
-	bcopy(&psinfo->pr_itimerval, &p->p_realtimer, sizeof(struct itimerval));
-	p->p_sigparent = psinfo->pr_sigparent;
-
 	SIG_CANTMASK(status->pr_sigmask);
 	bcopy(&status->pr_sigmask, &lp->lwp_sigmask, sizeof(sigset_t));
 	set_signalstack(lp, &status->pr_sigstk);
-
  done:	
 	TRACE_EXIT;
 	return error;
@@ -465,49 +476,44 @@ elf_getnote(void *src, size_t *off, const char *name, unsigned int type,
 }
 
 static int
-elf_demarshalnotes(void *src, prpsinfo_t *psinfo, prstatus_t *status, 
-		   prfpregset_t *fpregset, prsavetls_t *tls, int nthreads)
+elf_demarshalprocnotes(void *src, size_t *off, prpsinfo_t *psinfo)
+{
+	int error;
+
+	TRACE_ENTER;
+
+	error = elf_getnote(src, off, "CORE", NT_PRPSINFO, (void **)&psinfo,
+		sizeof(prpsinfo_t));
+
+	TRACE_EXIT;
+	return error;
+}
+
+
+static int
+elf_demarshallwpnotes(void *src, size_t *off, prstatus_t *status,
+	prfpregset_t *fpregset, prsavetls_t *tls, int nthreads)
 {
 	int i;
 	int error;
-	size_t off = 0;
 
 	TRACE_ENTER;
-	error = elf_getnote(src, &off, "CORE", NT_PRPSINFO,
-			   (void **)&psinfo, sizeof(prpsinfo_t));
-	if (error)
-		goto done;
-	error = elf_getnote(src, &off, "CORE", NT_PRSTATUS,
-			   (void **)&status, sizeof(prstatus_t));
-	if (error)
-		goto done;
-	error = elf_getnote(src, &off, "CORE", NT_FPREGSET,
-			   (void **)&fpregset, sizeof(prfpregset_t));
-	if (error)
-		goto done;
-	error = elf_getnote(src, &off, "DragonFly", NT_DRAGONFLY_TLS,
-			   (void **)&tls, sizeof(prsavetls_t));
-	if (error)
-		goto done;
 
-	/*
-	 * The remaining portion needs to be an integer multiple
-	 * of prstatus_t, prfpregset_t and prsavetls_t
-	 */
-	for (i = 0 ; i < nthreads - 1; i++) {
+	for (i = 0 ; i < nthreads; i++) {
+		error = elf_getnote(src, off, "CORE", NT_PRSTATUS, (void **)&status,
+			sizeof (prstatus_t));
+		if (error)
+			goto done;
+		error = elf_getnote(src, off, "CORE", NT_FPREGSET, (void **)&fpregset,
+			sizeof(prfpregset_t));
+		if (error)
+			goto done;
+		error = elf_getnote(src, off, "DragonFly", NT_DRAGONFLY_TLS,
+			(void **)&tls, sizeof(prsavetls_t));
+		if (error)
+			goto done;
+
 		status++; fpregset++; tls++;
-		error = elf_getnote(src, &off, "CORE", NT_PRSTATUS,
-				   (void **)&status, sizeof (prstatus_t));
-		if (error)
-			goto done;
-		error = elf_getnote(src, &off, "CORE", NT_FPREGSET,
-				   (void **)&fpregset, sizeof(prfpregset_t));
-		if (error)
-			goto done;
-		error = elf_getnote(src, &off, "DragonFly", NT_DRAGONFLY_TLS,
-				   (void **)&tls, sizeof(prsavetls_t));
-		if (error)
-			goto done;
 	}
 	
  done:
