@@ -75,19 +75,6 @@ struct ckpt_fileinfo {
 
 #define CKFIF_ISCKPTFD	0x0001
 
-struct ckpt_lwpsiginfo {
-	sigset_t	clsi_sigmask;
-	stack_t		clsi_sigstk;
-};
-
-struct ckpt_siginfo {
-	int		csi_ckptpisz;
-	struct sigacts	csi_sigacts;
-	struct itimerval csi_itimerval;
-	int		csi_sigparent;
-	struct ckpt_lwpsiginfo	csi_lwpinfo[1];
-};
-
 /*
  * Elf_Phdr is based on the inclusion of elf32 or elf64.  If neither was
  * included, we don't know what to do with it.  If the source needs the

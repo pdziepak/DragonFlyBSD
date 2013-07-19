@@ -32,6 +32,7 @@
 
 #include <sys/param.h>
 #include <sys/reg.h>
+#include <sys/signalvar.h>
 
 #include <machine/segments.h>
 
@@ -55,7 +56,7 @@ typedef struct fpreg fpregset_t;
  * for which each element exists in the structure.
  */
 
-#define PRSTATUS_VERSION	1	/* Current version of prstatus_t */
+#define PRSTATUS_VERSION	2	/* Current version of prstatus_t */
 
 typedef struct prstatus {
     int		pr_version;	/* Version number of struct (1) */
@@ -66,6 +67,8 @@ typedef struct prstatus {
     int		pr_cursig;	/* Current signal (1) */
     pid_t	pr_pid;		/* Process ID (1) */
     gregset_t	pr_reg;		/* General purpose registers (1) */
+	sigset_t	pr_sigmask;	/* Signal mask (2) */
+	stack_t		pr_sigstk;	/* Signal stack (2) */
 } prstatus_t;
 
 typedef gregset_t prgregset_t[1];
@@ -74,13 +77,17 @@ typedef struct savetls prsavetls_t;
 
 #define PRARGSZ		80	/* Maximum argument bytes saved */
 
-#define PRPSINFO_VERSION	1	/* Current version of prpsinfo_t */
+#define PRPSINFO_VERSION	2	/* Current version of prpsinfo_t */
 
 typedef struct prpsinfo {
     int		pr_version;	/* Version number of struct (1) */
     size_t	pr_psinfosz;	/* sizeof(prpsinfo_t) (1) */
     char	pr_fname[MAXCOMLEN+1];	/* Command name, null terminated (1) */
     char	pr_psargs[PRARGSZ+1];	/* Arguments, null terminated (1) */
+	int		pr_lwpcount;	/* Number of LWPs (2) */
+	struct sigacts	pr_sigacts;	/* Signal actions (2) */
+	struct itimerval	pr_itimerval;	/* Alarm timer (2) */
+	int		pr_sigparent;	/* Signal to parent on exit (2) */
 } prpsinfo_t;
 
 typedef void *psaddr_t;		/* An address in the target process. */

@@ -84,10 +84,7 @@ static int elf_demarshalnotes(void *src, prpsinfo_t *psinfo,
 static int elf_loadnotes(struct lwp *, prpsinfo_t *, prstatus_t *,
 		 prfpregset_t *, prsavetls_t *);
 static int elf_recreatelwps(struct lwp *mainlp, prstatus_t *status,
-		 prfpregset_t *fpregset, prsavetls_t *tls,
-		 struct ckpt_lwpsiginfo *siginfo, int nthreads);
-static int elf_getsigs(struct lwp *lp, struct file *fp, int nthreads,
-		 struct ckpt_lwpsiginfo **siginfo);
+		 prfpregset_t *fpregset, prsavetls_t *tls, int nthreads);
 static int elf_getfiles(struct lwp *lp, struct file *fp);
 static int elf_gettextvp(struct proc *p, struct file *fp);
 static char *ckpt_expand_name(const char *name, uid_t uid, pid_t pid);
@@ -241,7 +238,7 @@ elf_getnotes(struct lwp *lp, struct file *fp, size_t notesz,
 
 static int
 elf_recreatelwps(struct lwp *mainlp, prstatus_t *status, prfpregset_t *fpregset,
-	prsavetls_t *tls, struct ckpt_lwpsiginfo *siginfo, int nthreads)
+	prsavetls_t *tls, int nthreads)
 {
 	struct proc *p = mainlp->lwp_proc;
 	struct lwp *lp;
@@ -253,7 +250,7 @@ elf_recreatelwps(struct lwp *mainlp, prstatus_t *status, prfpregset_t *fpregset,
 	lwkt_gettoken(&p->p_token);
 	plimit_lwp_fork(p);
 	for (i = 1; i < nthreads; i++) {
-		status++; fpregset++; tls++; siginfo++;
+		status++; fpregset++; tls++;
 		lp = lwp_fork(mainlp, mainlp->lwp_proc, RFPROC);
 		if ((error = set_regs(lp, &status->pr_reg)) != 0)
 			goto fail;
@@ -262,9 +259,9 @@ elf_recreatelwps(struct lwp *mainlp, prstatus_t *status, prfpregset_t *fpregset,
 		if ((error = set_savetls(lp, tls)) != 0)
 			goto fail;
 
-		SIG_CANTMASK(siginfo->clsi_sigmask);
-		bcopy(&siginfo->clsi_sigmask, &lp->lwp_sigmask, sizeof(sigset_t));
-		set_signalstack(lp, &siginfo->clsi_sigstk);
+		SIG_CANTMASK(status->pr_sigmask);
+		bcopy(&status->pr_sigmask, &lp->lwp_sigmask, sizeof(sigset_t));
+		set_signalstack(lp, &status->pr_sigstk);
 	}
 
 	FOREACH_LWP_IN_PROC(lp, p) {
@@ -317,7 +314,6 @@ ckpt_thaw_proc(struct lwp *lp, struct file *fp)
 	prstatus_t *status = NULL;
 	prfpregset_t *fpregset = NULL;
 	prsavetls_t *tls = NULL;
-	struct ckpt_lwpsiginfo *siginfo = NULL;
 	int nthreads = 0;
 
 	TRACE_ENTER;
@@ -343,12 +339,6 @@ ckpt_thaw_proc(struct lwp *lp, struct file *fp)
 	if ((error = elf_gettextvp(p, fp)) != 0)
 		goto done;
 
-	/* fetch signal disposition */
-	if ((error = elf_getsigs(lp, fp, nthreads, &siginfo)) != 0) {
-		kprintf("failure in recovering signals\n");
-		goto done;
-	}
-
 	/* fetch open files */
 	if ((error = elf_getfiles(lp, fp)) != 0)
 		goto done;
@@ -359,7 +349,7 @@ ckpt_thaw_proc(struct lwp *lp, struct file *fp)
 		goto done;
 
 	/* recreate lwps */
-	error = elf_recreatelwps(lp, status, fpregset, tls, siginfo, nthreads);
+	error = elf_recreatelwps(lp, status, fpregset, tls, nthreads);
 
 	/*
 	 * Set the textvp to the checkpoint file and mark the vnode so
@@ -383,8 +373,6 @@ done:
 		kfree(fpregset, M_TEMP);
 	if (tls)
 		kfree(tls, M_TEMP);
-	if (siginfo)
-		kfree(siginfo, M_TEMP);
 	if (ehdr)
 		kfree(ehdr, M_TEMP);
 	if (phdr)
@@ -421,6 +409,15 @@ elf_loadnotes(struct lwp *lp, prpsinfo_t *psinfo, prstatus_t *status,
 
 	strlcpy(p->p_comm, psinfo->pr_fname, sizeof(p->p_comm));
 	/* XXX psinfo->pr_psargs not yet implemented */
+
+	bcopy(&psinfo->pr_sigacts, p->p_sigacts, sizeof(struct sigacts));
+	bcopy(&psinfo->pr_itimerval, &p->p_realtimer, sizeof(struct itimerval));
+	p->p_sigparent = psinfo->pr_sigparent;
+
+	SIG_CANTMASK(status->pr_sigmask);
+	bcopy(&status->pr_sigmask, &lp->lwp_sigmask, sizeof(sigset_t));
+	set_signalstack(lp, &status->pr_sigstk);
+
  done:	
 	TRACE_EXIT;
 	return error;
@@ -569,47 +566,6 @@ elf_loadphdrs(struct file *fp, Elf_Phdr *phdr, int numsegs)
 	return error;
 }
 
-static int
-elf_getsigs(struct lwp *lp, struct file *fp, int nthreads,
-	struct ckpt_lwpsiginfo** _siginfo) 
-{
-	struct proc *p = lp->lwp_proc;
-	int error;
-	struct ckpt_siginfo *csi;
-	size_t data_size;
-	struct ckpt_lwpsiginfo *siginfo;
-
-	TRACE_ENTER;
-	data_size = sizeof(struct ckpt_siginfo) + (nthreads - 1) * sizeof(sigset_t);
-	csi = kmalloc(data_size, M_TEMP, M_ZERO | M_WAITOK);
-	if ((error = read_check(fp, csi, data_size)) != 0)
-		goto done;
-
-	if (csi->csi_ckptpisz != sizeof(struct ckpt_siginfo)) {
-		TRACE_ERR;
-		error = EINVAL;
-		goto done;
-	}
-	bcopy(&csi->csi_sigacts, p->p_sigacts, sizeof(struct sigacts));
-	bcopy(&csi->csi_itimerval, &p->p_realtimer, sizeof(struct itimerval));
-	p->p_sigparent = csi->csi_sigparent;
-
-	siginfo = kmalloc(sizeof(struct ckpt_lwpsiginfo) * nthreads, M_TEMP,
-		M_WAITOK);
-	bcopy(csi->csi_lwpinfo, siginfo, sizeof(struct ckpt_lwpsiginfo) * nthreads);
-
-	SIG_CANTMASK(siginfo->clsi_sigmask);
-	bcopy(&siginfo->clsi_sigmask, &lp->lwp_sigmask, sizeof(sigset_t));
-	set_signalstack(lp, &siginfo->clsi_sigstk);
-
-	*_siginfo = siginfo;
-
- done:
-	if (csi)
-		kfree(csi, M_TEMP);
-	TRACE_EXIT;
-	return error;
-}
 
 /*
  * Returns a locked, refd vnode

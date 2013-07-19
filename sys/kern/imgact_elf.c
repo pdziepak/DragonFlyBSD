@@ -948,7 +948,6 @@ static int __elfN(puthdr)(struct lwp *, elf_buf_t, int sig, enum putmode,
 static int elf_putallnotes(struct lwp *, elf_buf_t, int, enum putmode);
 static int __elfN(putnote)(elf_buf_t, const char *, int, const void *, size_t);
 
-static int elf_putsigs(struct lwp *, elf_buf_t);
 static int elf_puttextvp(struct proc *, elf_buf_t);
 static int elf_putfiles(struct proc *, elf_buf_t, struct file *);
 
@@ -1330,8 +1329,6 @@ __elfN(puthdr)(struct lwp *lp, elf_buf_t target, int sig, enum putmode mode,
 	if (error == 0)
 		error = elf_puttextvp(p, target);
 	if (error == 0)
-		error = elf_putsigs(lp, target);
-	if (error == 0)
 		error = elf_putfiles(p, target, fp);
 
 	/*
@@ -1446,6 +1443,12 @@ elf_putallnotes(struct lwp *corelp, elf_buf_t target, int sig,
 		 */
 		strlcpy(psinfo->pr_psargs, p->p_comm,
 			sizeof(psinfo->pr_psargs));
+
+		psinfo->pr_lwpcount = p->p_nthreads;
+
+		bcopy(p->p_sigacts, &psinfo->pr_sigacts, sizeof(*p->p_sigacts));
+		bcopy(&p->p_realtimer, &psinfo->pr_itimerval, sizeof(struct itimerval));
+		psinfo->pr_sigparent = p->p_sigparent;
 	}
 	error =
 	    __elfN(putnote)(target, "CORE", NT_PRPSINFO, psinfo, sizeof *psinfo);
@@ -1472,7 +1475,11 @@ elf_putallnotes(struct lwp *corelp, elf_buf_t target, int sig,
 		fill_regs(corelp, &status->pr_reg);
 		fill_fpregs(corelp, fpregs);
 		fill_savetls(corelp, tls);
+
+		bcopy(&corelp->lwp_sigmask, &status->pr_sigmask, sizeof(sigset_t));
+		bcopy(&corelp->lwp_sigstk, &status->pr_sigstk, sizeof(stack_t));
 	}
+
 	error =
 	    __elfN(putnote)(target, "CORE", NT_PRSTATUS, status, sizeof *status);
 	if (error)
@@ -1501,6 +1508,9 @@ elf_putallnotes(struct lwp *corelp, elf_buf_t target, int sig,
 			fill_regs(lp, &status->pr_reg);
 			fill_fpregs(lp, fpregs);
 			fill_savetls(lp, tls);
+
+			bcopy(&lp->lwp_sigmask, &status->pr_sigmask, sizeof(sigset_t));
+			bcopy(&lp->lwp_sigstk, &status->pr_sigstk, sizeof(stack_t));
 		}
 		error = __elfN(putnote)(target, "CORE", NT_PRSTATUS,
 					status, sizeof *status);
@@ -1552,39 +1562,6 @@ __elfN(putnote)(elf_buf_t target, const char *name, int type,
 	return (error);
 }
 
-
-static int
-elf_putsigs(struct lwp *lp, elf_buf_t target)
-{
-	struct proc *p = lp->lwp_proc;
-	int error = 0;
-	struct ckpt_siginfo *csi;
-	int i = 1;
-	struct lwp *otherlp;
-
-	csi = target_reserve(target, sizeof(struct ckpt_siginfo)
-		+ (p->p_nthreads - 1) * sizeof(struct ckpt_lwpsiginfo), &error);
-	if (csi) {
-		csi->csi_ckptpisz = sizeof(struct ckpt_siginfo);
-		bcopy(p->p_sigacts, &csi->csi_sigacts, sizeof(*p->p_sigacts));
-		bcopy(&p->p_realtimer, &csi->csi_itimerval, sizeof(struct itimerval));
-		csi->csi_sigparent = p->p_sigparent;
-
-		bcopy(&lp->lwp_sigmask, &csi->csi_lwpinfo->clsi_sigmask,
-			sizeof(sigset_t));
-		bcopy(&lp->lwp_sigstk, &csi->csi_lwpinfo->clsi_sigstk, sizeof(stack_t));
-		FOREACH_LWP_IN_PROC(otherlp, p) {
-			if (otherlp == lp)
-				continue;
-
-			bcopy(&otherlp->lwp_sigmask, &csi->csi_lwpinfo[i++].clsi_sigmask,
-				sizeof(sigset_t));
-			bcopy(&otherlp->lwp_sigstk, &csi->csi_lwpinfo[i++].clsi_sigstk,
-				sizeof(stack_t));
-		}
-	}
-	return (error);
-}
 
 static int
 elf_putfiles(struct proc *p, elf_buf_t target, struct file *ckfp)
