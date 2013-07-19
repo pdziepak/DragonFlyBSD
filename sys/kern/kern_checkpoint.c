@@ -424,11 +424,14 @@ elf_loadlwpnotes(struct lwp *lp, prstatus_t *status, prfpregset_t *fpregset,
 		goto done;
 	if ((error = set_fpregs(lp, fpregset)) != 0)
 		goto done;
-	error = set_savetls(lp, tls);
+	if ((error = set_savetls(lp, tls)) != 0)
+		goto done;
 
 	SIG_CANTMASK(status->pr_sigmask);
 	bcopy(&status->pr_sigmask, &lp->lwp_sigmask, sizeof(sigset_t));
 	set_signalstack(lp, &status->pr_sigstk);
+
+	error = lwp_set_tid(lp, status->pr_pid);
  done:	
 	TRACE_EXIT;
 	return error;

@@ -563,6 +563,7 @@ void	lwp_dispose (struct lwp *);
 int	killalllwps (int);
 void	exit1 (int) __dead2;
 struct lwp *lwp_fork(struct lwp *, struct proc *, int);
+int		lwp_set_tid(struct lwp *, lwpid_t);
 void	cpu_fork (struct lwp *, struct lwp *, int);
 int	cpu_prepare_lwp(struct lwp *, struct lwp_params *);
 void	cpu_set_fork_handler (struct lwp *, void (*)(void *, struct trapframe *), void *);

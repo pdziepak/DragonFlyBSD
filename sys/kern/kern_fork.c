@@ -694,6 +694,25 @@ lwp_fork(struct lwp *origlp, struct proc *destproc, int flags)
 	return (lp);
 }
 
+int
+lwp_set_tid(struct lwp *lp, lwpid_t tid)
+{
+	struct proc *p = lp->lwp_proc;
+
+	if (lwp_rb_tree_RB_LOOKUP(&p->p_lwp_tree, tid) != NULL)
+		return EINVAL;
+
+	lwp_rb_tree_RB_REMOVE(&p->p_lwp_tree, lp);
+
+	if (p->p_lasttid < tid)
+		p->p_lasttid = tid;
+
+	lp->lwp_tid = tid;
+	lwp_rb_tree_RB_INSERT(&p->p_lwp_tree, lp);
+
+	return 0;
+}
+
 /*
  * The next two functionms are general routines to handle adding/deleting
  * items on the fork callout list.
