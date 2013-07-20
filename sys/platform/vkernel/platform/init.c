@@ -141,6 +141,8 @@ static void usage_err(const char *ctl, ...);
 static void usage_help(_Bool);
 static void init_locks(void);
 
+extern void vke_reattach(struct vknetif_info *info);
+
 static int save_ac;
 static char **save_av;
 
@@ -1124,7 +1126,8 @@ unix_connect(const char *path)
  */
 static
 int
-netif_init_tap(int tap_unit, in_addr_t *addr, in_addr_t *mask, int s)
+netif_init_tap(int tap_unit, in_addr_t *addr, in_addr_t *mask,
+	in_addr_t *_tap_addr, char **_ifbridge, int s)
 {
 	in_addr_t tap_addr, netmask, netif_addr;
 	int next_netif_addr;
@@ -1227,6 +1230,8 @@ back:
 
 	*addr = netif_addr;
 	*mask = netmask;
+	*_tap_addr = tap_addr;
+	*_ifbridge = ifbridge;
 	return 0;
 }
 
@@ -1242,6 +1247,8 @@ init_netif(char *netifExp[], int netifExpNum)
 	int i, s;
 	char *tmp;
 
+	bzero(&NetifInfo, sizeof(NetifInfo));
+
 	if (netifExpNum == 0)
 		return;
 
@@ -1252,8 +1259,10 @@ init_netif(char *netifExp[], int netifExpNum)
 	for (i = 0; i < netifExpNum; ++i) {
 		struct vknetif_info *info;
 		in_addr_t netif_addr, netif_mask;
+		in_addr_t tap_addr = 0;
 		int tap_fd, tap_unit;
 		char *netif;
+		char *bridge = NULL;
 
 		/* Extract MAC address if there is one */
 		tmp = netifExp[i];
@@ -1280,7 +1289,8 @@ init_netif(char *netifExp[], int netifExpNum)
 		 * NB: Rest part of netifExp[i] is passed
 		 *     to netif_init_tap() implicitly.
 		 */
-		if (netif_init_tap(tap_unit, &netif_addr, &netif_mask, s) < 0) {
+		if (netif_init_tap(tap_unit, &netif_addr, &netif_mask, &tap_addr,
+			&bridge, s) < 0) {
 			/*
 			 * NB: Closing tap(4) device file will bring
 			 *     down the corresponding interface
@@ -1290,11 +1300,13 @@ init_netif(char *netifExp[], int netifExpNum)
 		}
 
 		info = &NetifInfo[NetifNum];
-		bzero(info, sizeof(*info));
 		info->tap_fd = tap_fd;
 		info->tap_unit = tap_unit;
+		info->tap_addr = tap_addr;
 		info->netif_addr = netif_addr;
 		info->netif_mask = netif_mask;
+		info->netif_name = netif;
+		info->ifbridge = bridge;
 		/*
 		 * If tmp isn't NULL it means a MAC could have been
 		 * specified so attempt to convert it.
@@ -1321,6 +1333,50 @@ init_netif(char *netifExp[], int netifExpNum)
 
 static
 void
+netif_restore(void)
+{
+	int i, s;
+	int error;
+	struct vknetif_info *info;
+
+	kprintf("Restoring network...\n");
+	s = socket(AF_INET, SOCK_DGRAM, 0);
+	if (s < 0)
+		return;
+
+	for (i = 0; i < VKNETIF_MAX; i++) {
+		info = &NetifInfo[i];
+
+		if (info->netif_name == NULL)
+			continue;
+
+		info->tap_fd = netif_open_tap(info->netif_name, &info->tap_unit, s);
+
+		if (info->tap_fd < 0)
+			warnx("Couldn't reopen device file: %s", info->netif_name);
+		else {
+			if (info->ifbridge == NULL) {
+				error = netif_set_tapaddr(info->tap_unit, info->tap_addr,
+					info->netif_mask, s);
+			} else 
+				error = netif_add_tap2brg(info->tap_unit, info->ifbridge, s);
+
+			if (error < 0) {
+				warnx("Couldn't reinitialize network interface");
+				close(info->tap_fd);
+				info->tap_fd = -1;
+				info->tap_unit = -1;
+			}
+		}
+
+		if (info->ifnet)
+			vke_reattach(info);
+	}
+	close(s);
+}
+
+static
+void
 ckpt_sighandler(int sig)
 {
 	int error;
@@ -1339,6 +1395,8 @@ ckpt_sighandler(int sig)
 		warn("Couldn't save checkpoint file");
 		return;
 	}
+
+	netif_restore();
 
 	kprintf("Restored from checkpoint...\n");
 }
