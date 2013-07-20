@@ -32,6 +32,7 @@
  * SUCH DAMAGE.
  */
 
+#include <sys/checkpoint.h>
 #include <sys/types.h>
 #include <sys/systm.h>
 #include <sys/kernel.h>
@@ -45,6 +46,7 @@
 #include <sys/proc.h>
 #include <sys/msgbuf.h>
 #include <sys/vmspace.h>
+#include <sys/signal.h>
 #include <sys/socket.h>
 #include <sys/sockio.h>
 #include <sys/sysctl.h>
@@ -67,6 +69,7 @@
 #include <arpa/inet.h>
 #include <net/if_var.h>
 
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -130,6 +133,7 @@ static void init_globaldata(void);
 static void init_vkernel(void);
 static void init_disk(char *diskExp[], int diskFileNum, enum vkdisk_type type); 
 static void init_netif(char *netifExp[], int netifFileNum);
+static void init_checkpoint(void);
 static void writepid(void);
 static void cleanpid(void);
 static int unix_connect(const char *path);
@@ -401,6 +405,8 @@ main(int ac, char **av)
 	}
 	init_netif(netifFile, netifFileNum);
 	init_exceptions();
+	init_checkpoint();
+
 	mi_startup();
 	/* NOT REACHED */
 	exit(EX_SOFTWARE);
@@ -1311,6 +1317,63 @@ init_netif(char *netifExp[], int netifExpNum)
 			break;
 	}
 	close(s);
+}
+
+static
+void
+ckpt_sighandler(int sig)
+{
+	int error;
+
+	if (sig == SIGCKPT) {
+		kprintf("Checkpointing and continuing is not supported. Use "	\
+			"SIGCKPTEXIT instead.\n");
+		return;
+	}
+
+	msync((void*)KvaStart, KERNEL_KVA_SIZE, MS_SYNC);
+	error = sys_checkpoint(CKPT_FREEZE, -1, -1, -1);
+	if (error == 0)
+		exit(0);
+	if (error < 0) {
+		warn("Couldn't save checkpoint file");
+		return;
+	}
+
+	kprintf("Restored from checkpoint...\n");
+}
+
+static
+void
+init_checkpoint(void)
+{
+	struct sigaction sa;
+	stack_t st;
+	void *stack;
+
+	stack = malloc(SIGSTKSZ);
+	if (stack == NULL) {
+		err(1, "Couldn't allocate memory for the signal stack");
+		/* NOT_REACHED */
+	}
+
+	st.ss_sp = stack;
+	st.ss_size = SIGSTKSZ;
+	st.ss_flags = 0;
+	if (sigaltstack(&st, NULL) < 0) {
+		err(1, "Couldn't set the signal stack");
+		/* NOT_REACHED */
+	}
+
+	bzero(&sa, sizeof(sa));
+	sa.sa_flags = SA_ONSTACK;
+	sa.sa_handler = ckpt_sighandler;
+	sigemptyset(&sa.sa_mask);
+
+	if (sigaction(SIGCKPT, &sa, NULL) || sigaction(SIGCKPTEXIT, &sa, NULL)) {
+		err(1, "Couldn't set signal handlers");
+		/* NOT_REACHED */
+	}
 }
 
 /*
