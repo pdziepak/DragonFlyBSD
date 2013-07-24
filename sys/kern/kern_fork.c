@@ -699,6 +699,9 @@ lwp_set_tid(struct lwp *lp, lwpid_t tid)
 {
 	struct proc *p = lp->lwp_proc;
 
+	if (lp->lwp_tid == tid)
+		return 0;
+
 	if (lwp_rb_tree_RB_LOOKUP(&p->p_lwp_tree, tid) != NULL)
 		return EINVAL;
 
