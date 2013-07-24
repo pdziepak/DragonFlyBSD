@@ -47,6 +47,8 @@
 #include <net/ethernet.h>
 #endif
 
+#include <termios.h>
+
 #define VKNETIF_MAX	16
 #define VKDISK_MAX	16
 #define	SERNOLEN        30
@@ -114,7 +116,11 @@ void init_fpu(int supports_sse);
 void kern_trap(struct trapframe *);
 void user_trap(struct trapframe *);
 void syscall2 (struct trapframe *);
+
 void vcons_set_mode(int);
+void vcons_save_mode(struct termios *);
+void vcons_restore_mode(struct termios *);
+
 int npxdna(struct trapframe *);
 void npxpush(struct __mcontext *mctx);
 void npxpop(struct __mcontext *mctx);

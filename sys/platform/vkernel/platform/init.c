@@ -1379,6 +1379,7 @@ static
 void
 ckpt_sighandler(int sig)
 {
+	struct termios tio;
 	int error;
 
 	if (sig == SIGCKPT) {
@@ -1386,6 +1387,8 @@ ckpt_sighandler(int sig)
 			"SIGCKPTEXIT instead.\n");
 		return;
 	}
+
+	vcons_save_mode(&tio);
 
 	msync((void*)KvaStart, KERNEL_KVA_SIZE, MS_SYNC);
 	error = sys_checkpoint(CKPT_FREEZE, -1, -1, -1);
@@ -1397,6 +1400,7 @@ ckpt_sighandler(int sig)
 	}
 
 	netif_restore();
+	vcons_restore_mode(&tio);
 
 	kprintf("Restored from checkpoint...\n");
 }

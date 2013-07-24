@@ -432,3 +432,23 @@ vcons_set_mode(int in_debugger)
 	}
 	tcsetattr(0, TCSAFLUSH, &tio);
 }
+
+void
+vcons_save_mode(struct termios *tio)
+{
+	tcgetattr(0, tio);
+}
+
+void
+vcons_restore_mode(struct termios *tio)
+{
+	struct winsize newsize;
+
+	tcsetattr(0, TCSAFLUSH, tio);
+
+	if (vconsole != NULL && vconsole->cn_dev->si_tty != NULL) {
+		ioctl(0, TIOCGWINSZ, &newsize);
+		vconsole->cn_dev->si_tty->t_winsize = newsize;
+		pgsignal(vconsole->cn_dev->si_tty->t_pgrp, SIGWINCH, 1);
+	}
+}
