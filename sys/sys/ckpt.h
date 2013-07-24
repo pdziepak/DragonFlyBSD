@@ -48,12 +48,6 @@
 
 #define CKPT_MAXTHREADS	256
 
-struct ckpt_filehdr {
-	int		cfh_magic;	/* XXX implement */
-	int		cfh_nfiles;
-	int		cfh_reserved[8];
-};
-
 struct ckpt_vminfo {
 	segsz_t		cvm_dsize;
 	segsz_t		cvm_tsize;

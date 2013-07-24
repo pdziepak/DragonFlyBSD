@@ -442,6 +442,7 @@ typedef struct {
 #define NT_AUXV 	6		/* Contains copy of Elfxx_auxv_t */
 
 #define NT_DRAGONFLY_TLS	0x1000	/* Contains copy of savetls struct */
+#define NT_DRAGONFLY_FILES	0x1001	/* Contains ckpt_fileinfo structs */
 
 #define STN_UNDEF	0		/* Undefined symbol index */
 

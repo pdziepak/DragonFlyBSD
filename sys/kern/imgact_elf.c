@@ -945,11 +945,13 @@ static int __elfN(corehdr)(struct lwp *, int, struct file *, struct ucred *,
 enum putmode { WRITE, DRYRUN };
 static int __elfN(puthdr)(struct lwp *, elf_buf_t, int sig, enum putmode,
 			int, struct file *);
-static int elf_putallnotes(struct lwp *, elf_buf_t, int, enum putmode);
+static int elf_putallnotes(struct lwp *, elf_buf_t, int, enum putmode,
+			struct file *fp);
 static int __elfN(putnote)(elf_buf_t, const char *, int, const void *, size_t);
 
 static int elf_puttextvp(struct proc *, elf_buf_t);
-static int elf_putfiles(struct proc *, elf_buf_t, struct file *);
+static int elf_putfiles(struct proc *, elf_buf_t, struct file *,
+			struct ckpt_fileinfo *, int *);
 
 int
 __elfN(coredump)(struct lwp *lp, int sig, struct vnode *vp, off_t limit)
@@ -1316,7 +1318,7 @@ __elfN(puthdr)(struct lwp *lp, elf_buf_t target, int sig, enum putmode mode,
 
 	noteoff = target->off;
 	if (error == 0)
-		elf_putallnotes(lp, target, sig, mode);
+		elf_putallnotes(lp, target, sig, mode, fp);
 	notesz = target->off - noteoff;
 
 	/*
@@ -1328,8 +1330,6 @@ __elfN(puthdr)(struct lwp *lp, elf_buf_t target, int sig, enum putmode mode,
 	 */
 	if (error == 0)
 		error = elf_puttextvp(p, target);
-	if (error == 0)
-		error = elf_putfiles(p, target, fp);
 
 	/*
 	 * Align up to a page boundary for the program segments.  The
@@ -1396,10 +1396,11 @@ __elfN(puthdr)(struct lwp *lp, elf_buf_t target, int sig, enum putmode mode,
  */
 static int
 elf_putallnotes(struct lwp *corelp, elf_buf_t target, int sig,
-    enum putmode mode)
+    enum putmode mode, struct file *fp)
 {
 	struct proc *p = corelp->lwp_proc;
 	int error;
+	struct ckpt_fileinfo *cfi;
 	struct {
 		prstatus_t status;
 		prfpregset_t fpregs;
@@ -1411,6 +1412,7 @@ elf_putallnotes(struct lwp *corelp, elf_buf_t target, int sig,
 	prpsinfo_t *psinfo;
 	prsavetls_t *tls;
 	struct lwp *lp;
+	int nfiles;
 
 	/*
 	 * Allocate temporary storage for notes on heap to avoid stack overflow.
@@ -1421,17 +1423,25 @@ elf_putallnotes(struct lwp *corelp, elf_buf_t target, int sig,
 		fpregs = &tmpdata->fpregs;
 		psinfo = &tmpdata->psinfo;
 		tls = &tmpdata->tls;
+
+		cfi =  kmalloc(p->p_fd->fd_nfiles * sizeof(*cfi), M_TEMP,
+			M_ZERO | M_WAITOK);
 	} else {
 		tmpdata = NULL;
 		status = NULL;
 		fpregs = NULL;
 		psinfo = NULL;
 		tls = NULL;
+		cfi = NULL;
 	}
 
 	/*
 	 * Append LWP-agnostic note.
 	 */
+	error = elf_putfiles(p, target, fp, cfi, &nfiles);
+	if (error)
+		goto exit;
+
 	if (mode != DRYRUN) {
 		psinfo->pr_version = PRPSINFO_VERSION;
 		psinfo->pr_psinfosz = sizeof(prpsinfo_t);
@@ -1444,16 +1454,24 @@ elf_putallnotes(struct lwp *corelp, elf_buf_t target, int sig,
 		strlcpy(psinfo->pr_psargs, p->p_comm,
 			sizeof(psinfo->pr_psargs));
 
-		psinfo->pr_lwpcount = p->p_nthreads;
+		psinfo->pr_nthreads = p->p_nthreads;
+		psinfo->pr_nfiles = nfiles;
 
 		bcopy(p->p_sigacts, &psinfo->pr_sigacts, sizeof(*p->p_sigacts));
 		bcopy(&p->p_realtimer, &psinfo->pr_itimerval, sizeof(struct itimerval));
 		psinfo->pr_sigparent = p->p_sigparent;
 	}
+
 	error =
 	    __elfN(putnote)(target, "CORE", NT_PRPSINFO, psinfo, sizeof *psinfo);
 	if (error)
 		goto exit;
+	if (nfiles > 0) {
+		error = __elfN(putnote)(target, "DragonFly", NT_DRAGONFLY_FILES, cfi,
+			nfiles * sizeof(*cfi));
+		if (error)
+			goto exit;
+	}
 
 	/*
 	 * Append first note for LWP that triggered core so that it is
@@ -1529,6 +1547,8 @@ elf_putallnotes(struct lwp *corelp, elf_buf_t target, int sig,
 exit:
 	if (tmpdata != NULL)
 		kfree(tmpdata, M_TEMP);
+	if (cfi != NULL)
+		kfree(cfi, M_TEMP);
 	return (error);
 }
 
@@ -1564,27 +1584,18 @@ __elfN(putnote)(elf_buf_t target, const char *name, int type,
 
 
 static int
-elf_putfiles(struct proc *p, elf_buf_t target, struct file *ckfp)
+elf_putfiles(struct proc *p, elf_buf_t target, struct file *ckfp,
+	struct ckpt_fileinfo *cfi, int *_nfiles)
 {
 	int error = 0;
-	int i;
-	struct ckpt_filehdr *cfh = NULL;
-	struct ckpt_fileinfo *cfi;
+	int i, j;
 	struct file *fp;	
 	struct vnode *vp;
-	/*
-	 * the duplicated loop is gross, but it was the only way
-	 * to eliminate uninitialized variable warnings 
-	 */
-	cfh = target_reserve(target, sizeof(struct ckpt_filehdr), &error);
-	if (cfh) {
-		cfh->cfh_nfiles = 0;		
-	}
 
 	/*
 	 * ignore STDIN/STDERR/STDOUT.
 	 */
-	for (i = 3; error == 0 && i < p->p_fd->fd_nfiles; i++) {
+	for (j = 0, i = 3; error == 0 && i < p->p_fd->fd_nfiles; i++) {
 		fp = holdfp(p->p_fd, i, -1);
 		if (fp == NULL)
 			continue;
@@ -1595,22 +1606,19 @@ elf_putfiles(struct proc *p, elf_buf_t target, struct file *ckfp)
 			fdrop(fp);
 			continue;
 		}
-		cfi = target_reserve(target, sizeof(struct ckpt_fileinfo),
-					&error);
-		if (cfi == NULL) {
-			fdrop(fp);
-			continue;
-		}
-		cfi->cfi_index = -1;
-		cfi->cfi_type = fp->f_type;
-		cfi->cfi_flags = fp->f_flag;
-		cfi->cfi_offset = fp->f_offset;
-		cfi->cfi_ckflags = 0;
 
-		if (fp == ckfp)
-			cfi->cfi_ckflags |= CKFIF_ISCKPTFD;
-		/* f_count and f_msgcount should not be saved/restored */
-		/* XXX save cred info */
+		if (cfi) {
+			cfi[j].cfi_index = -1;
+			cfi[j].cfi_type = fp->f_type;
+			cfi[j].cfi_flags = fp->f_flag;
+			cfi[j].cfi_offset = fp->f_offset;
+			cfi[j].cfi_ckflags = 0;
+
+			if (fp == ckfp)
+				cfi[j].cfi_ckflags |= CKFIF_ISCKPTFD;
+			/* f_count and f_msgcount should not be saved/restored */
+			/* XXX save cred info */
+		}
 
 		switch(fp->f_type) {
 		case DTYPE_VNODE:
@@ -1623,16 +1631,20 @@ elf_putfiles(struct proc *p, elf_buf_t target, struct file *ckfp)
 			 */
 			if (vp == NULL || vp->v_mount == NULL)
 				break;
-			cfh->cfh_nfiles++;
-			cfi->cfi_index = i;
-			cfi->cfi_fh.fh_fsid = vp->v_mount->mnt_stat.f_fsid;
-			error = VFS_VPTOFH(vp, &cfi->cfi_fh.fh_fid);
+			if (cfi) {
+				cfi[j].cfi_index = i;
+				cfi[j].cfi_fh.fh_fsid = vp->v_mount->mnt_stat.f_fsid;
+				error = VFS_VPTOFH(vp, &cfi[j].cfi_fh.fh_fid);
+			}
+			j++;
 			break;
 		default:
 			break;
 		}
 		fdrop(fp);
 	}
+	
+	*_nfiles = j;
 	return (error);
 }
 

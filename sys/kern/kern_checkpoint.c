@@ -78,15 +78,18 @@ static int elf_loadphdrs(struct file *fp,  Elf_Phdr *phdr, int numsegs);
 static int elf_getnotes(struct lwp *lp, struct file *fp, size_t notesz,
 		 prstatus_t **_status, prfpregset_t **_fpregset, prsavetls_t **_tls,
 		 int *_nthreads);
-static int elf_demarshalprocnotes(void *src, size_t *off, prpsinfo_t *psinfo);
-static int elf_loadprocnotes(struct lwp *lp, prpsinfo_t *psinfo, int *nthreads);
+static int elf_demarshalprocnotes(void *src, size_t *off, prpsinfo_t *psinfo,
+		 struct ckpt_fileinfo **cfi);
+static int elf_loadprocnotes(struct lwp *lp, struct file *fp,
+		 prpsinfo_t *psinfo, struct ckpt_fileinfo *cfi, int *nthreads);
 static int elf_demarshallwpnotes(void *src, size_t *off, prstatus_t *status,
 		 prfpregset_t *fpregset, prsavetls_t *tls, int nthreads);
 static int elf_loadlwpnotes(struct lwp *, prstatus_t *, prfpregset_t *,
 		 prsavetls_t *);
 static int elf_recreatelwps(struct lwp *mainlp, prstatus_t *status,
 		 prfpregset_t *fpregset, prsavetls_t *tls, int nthreads);
-static int elf_getfiles(struct lwp *lp, struct file *fp);
+static int elf_getfiles(struct lwp *lp, struct file *fp,
+		 struct ckpt_fileinfo *cfi, int nfiles);
 static int elf_gettextvp(struct proc *p, struct file *fp);
 static char *ckpt_expand_name(const char *name, uid_t uid, pid_t pid);
 
@@ -193,6 +196,7 @@ elf_getnotes(struct lwp *lp, struct file *fp, size_t notesz,
 	prstatus_t *status;
 	prfpregset_t *fpregset;
 	prsavetls_t *tls;
+	struct ckpt_fileinfo *cfi = NULL;
 
 	psinfo  = kmalloc(sizeof(prpsinfo_t), M_TEMP, M_ZERO | M_WAITOK);
 	note = kmalloc(notesz, M_TEMP, M_WAITOK);
@@ -200,10 +204,10 @@ elf_getnotes(struct lwp *lp, struct file *fp, size_t notesz,
 	PRINTF(("reading notes section\n"));
 	if ((error = read_check(fp, note, notesz)) != 0)
 		goto done;
-	error = elf_demarshalprocnotes(note, &off, psinfo);
+	error = elf_demarshalprocnotes(note, &off, psinfo, &cfi);
 	if (error)
 		goto done;
-	error = elf_loadprocnotes(lp, psinfo, &nthreads);
+	error = elf_loadprocnotes(lp, fp, psinfo, cfi, &nthreads);
 	if (error)
 		goto done;
 
@@ -228,6 +232,8 @@ elf_getnotes(struct lwp *lp, struct file *fp, size_t notesz,
 	*_tls = tls;
 	*_nthreads = nthreads;
  done:
+	if (cfi)
+		kfree(cfi, M_TEMP);
 	if (psinfo)
 		kfree(psinfo, M_TEMP);
 	if (note)
@@ -332,10 +338,6 @@ ckpt_thaw_proc(struct lwp *lp, struct file *fp)
 	if ((error = elf_gettextvp(p, fp)) != 0)
 		goto done;
 
-	/* fetch open files */
-	if ((error = elf_getfiles(lp, fp)) != 0)
-		goto done;
-
 	/* handle mappings last in case we are reading from a socket */
 	error = elf_loadphdrs(fp, phdr, ehdr->e_phnum);
 	if (error != 0)
@@ -375,7 +377,8 @@ done:
 }
 
 static int
-elf_loadprocnotes(struct lwp *lp, prpsinfo_t *psinfo, int *nthreads)
+elf_loadprocnotes(struct lwp *lp, struct file *fp, prpsinfo_t *psinfo,
+	struct ckpt_fileinfo *cfi, int *nthreads)
 {
 	struct proc *p = lp->lwp_proc;
 	int error = 0;
@@ -396,7 +399,9 @@ elf_loadprocnotes(struct lwp *lp, prpsinfo_t *psinfo, int *nthreads)
 	bcopy(&psinfo->pr_itimerval, &p->p_realtimer, sizeof(struct itimerval));
 	p->p_sigparent = psinfo->pr_sigparent;
 
-	*nthreads = psinfo->pr_lwpcount;
+	*nthreads = psinfo->pr_nthreads;
+
+	error = elf_getfiles(lp, fp, cfi, psinfo->pr_nfiles);
 
  done:	
 	TRACE_EXIT;
@@ -479,7 +484,8 @@ elf_getnote(void *src, size_t *off, const char *name, unsigned int type,
 }
 
 static int
-elf_demarshalprocnotes(void *src, size_t *off, prpsinfo_t *psinfo)
+elf_demarshalprocnotes(void *src, size_t *off, prpsinfo_t *psinfo,
+	struct ckpt_fileinfo** cfi)
 {
 	int error;
 
@@ -487,6 +493,18 @@ elf_demarshalprocnotes(void *src, size_t *off, prpsinfo_t *psinfo)
 
 	error = elf_getnote(src, off, "CORE", NT_PRPSINFO, (void **)&psinfo,
 		sizeof(prpsinfo_t));
+	if (error)
+		return error;
+
+	if (psinfo->pr_nfiles > 0) {
+		*cfi = kmalloc(psinfo->pr_nfiles * sizeof(struct ckpt_fileinfo), M_TEMP,
+			M_WAITOK);
+		error = elf_getnote(src, off, "DragonFly", NT_DRAGONFLY_FILES,
+			(void **)cfi, psinfo->pr_nfiles * sizeof(struct ckpt_fileinfo));
+		if (error)
+			kfree(*cfi, M_TEMP);
+	} else
+		*cfi = NULL;
 
 	TRACE_EXIT;
 	return error;
@@ -681,27 +699,18 @@ elf_gettextvp(struct proc *p, struct file *fp)
 
 /* place holder */
 static int
-elf_getfiles(struct lwp *lp, struct file *fp)
+elf_getfiles(struct lwp *lp, struct file *fp, struct ckpt_fileinfo *cfi_base,
+	int filecount)
 {
 	int error;
 	int i;
-	int filecount;
 	int fd;
-	struct ckpt_filehdr filehdr;
-	struct ckpt_fileinfo *cfi_base = NULL;
 	struct filedesc *fdp = lp->lwp_proc->p_fd;
 	struct vnode *vp;
 	struct file *tempfp;
 	struct file *ofp;
 
 	TRACE_ENTER;
-	if ((error = read_check(fp, &filehdr, sizeof(filehdr))) != 0)
-		goto done;
-	filecount = filehdr.cfh_nfiles;
-	cfi_base = kmalloc(filecount*sizeof(struct ckpt_fileinfo), M_TEMP, M_WAITOK);
-	error = read_check(fp, cfi_base, filecount*sizeof(struct ckpt_fileinfo));
-	if (error)
-		goto done;
 
 	/*
 	 * Close all file descriptors >= 3.  These descriptors are from the
@@ -777,8 +786,6 @@ elf_getfiles(struct lwp *lp, struct file *fp)
 	}
 
  done:
-	if (cfi_base)
-		kfree(cfi_base, M_TEMP);
 	TRACE_EXIT;
 	return error;
 }

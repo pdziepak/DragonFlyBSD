@@ -84,7 +84,8 @@ typedef struct prpsinfo {
     size_t	pr_psinfosz;	/* sizeof(prpsinfo_t) (1) */
     char	pr_fname[MAXCOMLEN+1];	/* Command name, null terminated (1) */
     char	pr_psargs[PRARGSZ+1];	/* Arguments, null terminated (1) */
-	int		pr_lwpcount;	/* Number of LWPs (2) */
+	int		pr_nthreads;	/* Number of LWPs (2) */
+	int		pr_nfiles;	/* Number of opened files (2) */
 	struct sigacts	pr_sigacts;	/* Signal actions (2) */
 	struct itimerval	pr_itimerval;	/* Alarm timer (2) */
 	int		pr_sigparent;	/* Signal to parent on exit (2) */
