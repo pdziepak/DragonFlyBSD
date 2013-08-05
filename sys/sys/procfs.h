@@ -86,9 +86,14 @@ typedef struct prpsinfo {
     char	pr_psargs[PRARGSZ+1];	/* Arguments, null terminated (1) */
 	int		pr_nthreads;	/* Number of LWPs (2) */
 	int		pr_nfiles;	/* Number of opened files (2) */
+	int		pr_nmaps;	/* Number of custom mappings (2) */
 	struct sigacts	pr_sigacts;	/* Signal actions (2) */
 	struct itimerval	pr_itimerval;	/* Alarm timer (2) */
 	int		pr_sigparent;	/* Signal to parent on exit (2) */
+	segsz_t		pr_dsize;	/* VM data size (pages) (2) */
+	segsz_t		pr_tsize;	/* VM text size (pages) (2) */
+	caddr_t		pr_daddr;	/* User virtual address of data (2) */
+	caddr_t		pr_taddr;	/* User virtual address of text (2) */
 } prpsinfo_t;
 
 typedef void *psaddr_t;		/* An address in the target process. */

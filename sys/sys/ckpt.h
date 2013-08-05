@@ -48,15 +48,6 @@
 
 #define CKPT_MAXTHREADS	256
 
-struct ckpt_vminfo {
-	segsz_t		cvm_dsize;
-	segsz_t		cvm_tsize;
-	segsz_t		cvm_reserved1[4];
-	caddr_t		cvm_daddr;
-	caddr_t		cvm_taddr;
-	caddr_t		cvm_reserved2[4];
-};
-
 struct ckpt_fileinfo {
 	int		cfi_index;
 	u_int		cfi_flags;	/* saved f_flag	*/
@@ -79,7 +70,10 @@ struct ckpt_fileinfo {
 struct vn_hdr {
 	fhandle_t	vnh_fh;
 	Elf_Phdr	vnh_phdr;
-	int		vnh_reserved[8];
+	int		vnh_type;
+	int		vnh_flags;
+	vpte_t	vnh_master_pde;
+	int		vnh_reserved[4];
 };
 
 #endif

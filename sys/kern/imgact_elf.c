@@ -949,7 +949,8 @@ static int elf_putallnotes(struct lwp *, elf_buf_t, int, enum putmode,
 			struct file *fp);
 static int __elfN(putnote)(elf_buf_t, const char *, int, const void *, size_t);
 
-static int elf_puttextvp(struct proc *, elf_buf_t);
+static int elf_putmaps(struct proc *p, elf_buf_t target, int nmaps,
+			struct vn_hdr *vnh);
 static int elf_putfiles(struct proc *, elf_buf_t, struct file *,
 			struct ckpt_fileinfo *, int *);
 
@@ -1053,6 +1054,8 @@ cb_put_phdr(vm_map_entry_t entry, void *closure)
 
 	if (phc->phdr == phc->phdr_max)
 		return (EINVAL);
+	if (entry->maptype != VM_MAPTYPE_NORMAL)
+		return (0);
 
 	phc->offset = round_page(phc->offset);
 
@@ -1078,8 +1081,10 @@ cb_size_segment(vm_map_entry_t entry, void *closure)
 {
 	struct sseg_closure *ssc = closure;
 
-	++ssc->count;
-	ssc->vsize += entry->end - entry->start;
+	if (entry->maptype == VM_MAPTYPE_NORMAL) {
+		++ssc->count;
+		ssc->vsize += entry->end - entry->start;
+	}
 	return (0);
 }
 
@@ -1152,7 +1157,7 @@ cb_put_fp(vm_map_entry_t entry, void *closure)
 		}
 
 		phdr->p_type = PT_LOAD;
-		phdr->p_offset = 0;        /* not written to core */
+		phdr->p_offset = entry->offset;
 		phdr->p_vaddr = entry->start;
 		phdr->p_paddr = 0;
 		phdr->p_filesz = phdr->p_memsz = entry->end - entry->start;
@@ -1164,6 +1169,12 @@ cb_put_fp(vm_map_entry_t entry, void *closure)
 			phdr->p_flags |= PF_W;
 		if (entry->protection & VM_PROT_EXECUTE)
 			phdr->p_flags |= PF_X;
+
+		vnh->vnh_type = entry->maptype;
+		vnh->vnh_flags = entry->eflags;
+		if (entry->maptype == VM_MAPTYPE_VPAGETABLE)
+			vnh->vnh_master_pde = entry->aux.master_pde;
+
 		++fpc->vnh;
 		++fpc->count;
 	}
@@ -1214,7 +1225,8 @@ each_segment(struct proc *p, segment_callback func, void *closure, int writable)
 		 */
 		if (writable && (entry->eflags & MAP_ENTRY_NOCOREDUMP))
 			continue;
-		if (entry->maptype != VM_MAPTYPE_NORMAL)
+		if (entry->maptype != VM_MAPTYPE_NORMAL &&
+			entry->maptype != VM_MAPTYPE_VPAGETABLE)
 			continue;
 		if ((obj = entry->object.vm_object) == NULL)
 			continue;
@@ -1322,16 +1334,6 @@ __elfN(puthdr)(struct lwp *lp, elf_buf_t target, int sig, enum putmode mode,
 	notesz = target->off - noteoff;
 
 	/*
-	 * put extra cruft for dumping process state here 
-	 *  - we really want it be before all the program 
-	 *    mappings
-	 *  - we just need to update the offset accordingly
-	 *    and GDB will be none the wiser.
-	 */
-	if (error == 0)
-		error = elf_puttextvp(p, target);
-
-	/*
 	 * Align up to a page boundary for the program segments.  The
 	 * actual data will be written to the outptu file, not to elf_buf_t,
 	 * so we do not have to do any further bounds checking.
@@ -1401,6 +1403,7 @@ elf_putallnotes(struct lwp *corelp, elf_buf_t target, int sig,
 	struct proc *p = corelp->lwp_proc;
 	int error;
 	struct ckpt_fileinfo *cfi;
+	struct vn_hdr *vnh;
 	struct {
 		prstatus_t status;
 		prfpregset_t fpregs;
@@ -1413,6 +1416,7 @@ elf_putallnotes(struct lwp *corelp, elf_buf_t target, int sig,
 	prsavetls_t *tls;
 	struct lwp *lp;
 	int nfiles;
+	int nmaps = 0;
 
 	/*
 	 * Allocate temporary storage for notes on heap to avoid stack overflow.
@@ -1424,8 +1428,9 @@ elf_putallnotes(struct lwp *corelp, elf_buf_t target, int sig,
 		psinfo = &tmpdata->psinfo;
 		tls = &tmpdata->tls;
 
-		cfi =  kmalloc(p->p_fd->fd_nfiles * sizeof(*cfi), M_TEMP,
+		cfi = kmalloc(p->p_fd->fd_nfiles * sizeof(*cfi), M_TEMP,
 			M_ZERO | M_WAITOK);
+		vnh = NULL;
 	} else {
 		tmpdata = NULL;
 		status = NULL;
@@ -1433,12 +1438,17 @@ elf_putallnotes(struct lwp *corelp, elf_buf_t target, int sig,
 		psinfo = NULL;
 		tls = NULL;
 		cfi = NULL;
+		vnh = NULL;
 	}
 
 	/*
 	 * Append LWP-agnostic note.
 	 */
 	error = elf_putfiles(p, target, fp, cfi, &nfiles);
+	if (error)
+		goto exit;
+
+	error = each_segment(p, cb_fpcount_segment, &nmaps, 0);
 	if (error)
 		goto exit;
 
@@ -1456,10 +1466,21 @@ elf_putallnotes(struct lwp *corelp, elf_buf_t target, int sig,
 
 		psinfo->pr_nthreads = p->p_nthreads;
 		psinfo->pr_nfiles = nfiles;
+		psinfo->pr_nmaps = nmaps;
 
 		bcopy(p->p_sigacts, &psinfo->pr_sigacts, sizeof(*p->p_sigacts));
 		bcopy(&p->p_realtimer, &psinfo->pr_itimerval, sizeof(struct itimerval));
 		psinfo->pr_sigparent = p->p_sigparent;
+
+		psinfo->pr_dsize = p->p_vmspace->vm_dsize;
+		psinfo->pr_tsize = p->p_vmspace->vm_tsize;
+		psinfo->pr_daddr = p->p_vmspace->vm_daddr;
+		psinfo->pr_taddr = p->p_vmspace->vm_taddr;
+
+		vnh = kmalloc(nmaps * sizeof(*vnh), M_TEMP, M_ZERO | M_WAITOK);
+		error = elf_putmaps(p, target, nmaps, vnh);
+		if (error)
+			goto exit;
 	}
 
 	error =
@@ -1472,6 +1493,13 @@ elf_putallnotes(struct lwp *corelp, elf_buf_t target, int sig,
 		if (error)
 			goto exit;
 	}
+	if (nmaps > 0) {
+		error = __elfN(putnote)(target, "DragonFly", NT_DRAGONFLY_MAPS, vnh,
+			nmaps * sizeof(*vnh));
+		if (error)
+			goto exit;
+	}
+
 
 	/*
 	 * Append first note for LWP that triggered core so that it is
@@ -1549,6 +1577,8 @@ exit:
 		kfree(tmpdata, M_TEMP);
 	if (cfi != NULL)
 		kfree(cfi, M_TEMP);
+	if (vnh != NULL)
+		kfree(vnh, M_TEMP);
 	return (error);
 }
 
@@ -1649,34 +1679,14 @@ elf_putfiles(struct proc *p, elf_buf_t target, struct file *ckfp,
 }
 
 static int
-elf_puttextvp(struct proc *p, elf_buf_t target)
+elf_putmaps(struct proc *p, elf_buf_t target, int nmaps, struct vn_hdr *vnh)
 {
-	int error = 0;
-	int *vn_count;
 	struct fp_closure fpc;
-	struct ckpt_vminfo *vminfo;
+	int error;
 
-	vminfo = target_reserve(target, sizeof(struct ckpt_vminfo), &error);
-	if (vminfo != NULL) {
-		vminfo->cvm_dsize = p->p_vmspace->vm_dsize;
-		vminfo->cvm_tsize = p->p_vmspace->vm_tsize;
-		vminfo->cvm_daddr = p->p_vmspace->vm_daddr;
-		vminfo->cvm_taddr = p->p_vmspace->vm_taddr;
-	}
-
-	fpc.count = 0;
-	vn_count = target_reserve(target, sizeof(int), &error);
-	if (target->buf != NULL) {
-		fpc.vnh = (struct vn_hdr *)(target->buf + target->off);
-		fpc.vnh_max = fpc.vnh + 
-			(target->off_max - target->off) / sizeof(struct vn_hdr);
-		error = each_segment(p, cb_put_fp, &fpc, 0);
-		if (vn_count)
-			*vn_count = fpc.count;
-	} else {
-		error = each_segment(p, cb_fpcount_segment, &fpc.count, 0);
-	}
-	target->off += fpc.count * sizeof(struct vn_hdr);
+	fpc.vnh = vnh;
+	fpc.vnh_max = fpc.vnh + nmaps;
+	error = each_segment(p, cb_put_fp, &fpc, 0);
 	return (error);
 }
 

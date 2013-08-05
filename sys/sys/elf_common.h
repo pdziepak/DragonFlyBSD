@@ -443,6 +443,7 @@ typedef struct {
 
 #define NT_DRAGONFLY_TLS	0x1000	/* Contains copy of savetls struct */
 #define NT_DRAGONFLY_FILES	0x1001	/* Contains ckpt_fileinfo structs */
+#define NT_DRAGONFLY_MAPS	0x1002	/* Contains vn_hdr structs */
 
 #define STN_UNDEF	0		/* Undefined symbol index */
 

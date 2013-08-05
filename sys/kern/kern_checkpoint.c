@@ -70,6 +70,7 @@
 #include <sys/checkpoint.h>
 #include <sys/mount.h>
 #include <sys/ckpt.h>
+#include <sys/vmspace.h>
 
 #include <sys/mplock2.h>
 #include <sys/file2.h>
@@ -79,9 +80,10 @@ static int elf_getnotes(struct lwp *lp, struct file *fp, size_t notesz,
 		 prstatus_t **_status, prfpregset_t **_fpregset, prsavetls_t **_tls,
 		 int *_nthreads);
 static int elf_demarshalprocnotes(void *src, size_t *off, prpsinfo_t *psinfo,
-		 struct ckpt_fileinfo **cfi);
+		 struct ckpt_fileinfo **cfi, struct vn_hdr **vnh);
 static int elf_loadprocnotes(struct lwp *lp, struct file *fp,
-		 prpsinfo_t *psinfo, struct ckpt_fileinfo *cfi, int *nthreads);
+		 prpsinfo_t *psinfo, struct ckpt_fileinfo *cfi, struct vn_hdr *vnh,
+		 int *nthreads);
 static int elf_demarshallwpnotes(void *src, size_t *off, prstatus_t *status,
 		 prfpregset_t *fpregset, prsavetls_t *tls, int nthreads);
 static int elf_loadlwpnotes(struct lwp *, prstatus_t *, prfpregset_t *,
@@ -90,7 +92,7 @@ static int elf_recreatelwps(struct lwp *mainlp, prstatus_t *status,
 		 prfpregset_t *fpregset, prsavetls_t *tls, int nthreads);
 static int elf_getfiles(struct lwp *lp, struct file *fp,
 		 struct ckpt_fileinfo *cfi, int nfiles);
-static int elf_gettextvp(struct proc *p, struct file *fp);
+static int elf_getmaps(struct vn_hdr *vnh, int nmaps);
 static char *ckpt_expand_name(const char *name, uid_t uid, pid_t pid);
 
 static int ckptgroup = 0;       /* wheel only, -1 for any group */
@@ -197,6 +199,7 @@ elf_getnotes(struct lwp *lp, struct file *fp, size_t notesz,
 	prfpregset_t *fpregset;
 	prsavetls_t *tls;
 	struct ckpt_fileinfo *cfi = NULL;
+	struct vn_hdr *vnh = NULL;
 
 	psinfo  = kmalloc(sizeof(prpsinfo_t), M_TEMP, M_ZERO | M_WAITOK);
 	note = kmalloc(notesz, M_TEMP, M_WAITOK);
@@ -204,10 +207,10 @@ elf_getnotes(struct lwp *lp, struct file *fp, size_t notesz,
 	PRINTF(("reading notes section\n"));
 	if ((error = read_check(fp, note, notesz)) != 0)
 		goto done;
-	error = elf_demarshalprocnotes(note, &off, psinfo, &cfi);
+	error = elf_demarshalprocnotes(note, &off, psinfo, &cfi, &vnh);
 	if (error)
 		goto done;
-	error = elf_loadprocnotes(lp, fp, psinfo, cfi, &nthreads);
+	error = elf_loadprocnotes(lp, fp, psinfo, cfi, vnh, &nthreads);
 	if (error)
 		goto done;
 
@@ -232,6 +235,8 @@ elf_getnotes(struct lwp *lp, struct file *fp, size_t notesz,
 	*_tls = tls;
 	*_nthreads = nthreads;
  done:
+	if (vnh)
+		kfree(vnh, M_TEMP);
 	if (cfi)
 		kfree(cfi, M_TEMP);
 	if (psinfo)
@@ -334,10 +339,6 @@ ckpt_thaw_proc(struct lwp *lp, struct file *fp)
 	if (error != 0)
 		goto done;
 
-	/* fetch program text vnodes */
-	if ((error = elf_gettextvp(p, fp)) != 0)
-		goto done;
-
 	/* handle mappings last in case we are reading from a socket */
 	error = elf_loadphdrs(fp, phdr, ehdr->e_phnum);
 	if (error != 0)
@@ -378,7 +379,7 @@ done:
 
 static int
 elf_loadprocnotes(struct lwp *lp, struct file *fp, prpsinfo_t *psinfo,
-	struct ckpt_fileinfo *cfi, int *nthreads)
+	struct ckpt_fileinfo *cfi, struct vn_hdr *vnh, int *nthreads)
 {
 	struct proc *p = lp->lwp_proc;
 	int error = 0;
@@ -392,6 +393,17 @@ elf_loadprocnotes(struct lwp *lp, struct file *fp, prpsinfo_t *psinfo,
 		goto done;
 	}
 
+	if (psinfo->pr_dsize < 0 || 
+	    psinfo->pr_dsize > p->p_rlimit[RLIMIT_DATA].rlim_cur ||
+	    psinfo->pr_tsize < 0 ||
+	    (u_quad_t)psinfo->pr_tsize > maxtsiz ||
+	    psinfo->pr_daddr >= (caddr_t)VM_MAX_USER_ADDRESS ||
+	    psinfo->pr_taddr >= (caddr_t)VM_MAX_USER_ADDRESS
+	) {
+	    error = ERANGE;
+	    goto done;
+	}
+
 	strlcpy(p->p_comm, psinfo->pr_fname, sizeof(p->p_comm));
 	/* XXX psinfo->pr_psargs not yet implemented */
 
@@ -401,7 +413,17 @@ elf_loadprocnotes(struct lwp *lp, struct file *fp, prpsinfo_t *psinfo,
 
 	*nthreads = psinfo->pr_nthreads;
 
+	vmspace_exec(p, NULL);
+	p->p_vmspace->vm_daddr = psinfo->pr_daddr;
+	p->p_vmspace->vm_dsize = psinfo->pr_dsize;
+	p->p_vmspace->vm_taddr = psinfo->pr_taddr;
+	p->p_vmspace->vm_tsize = psinfo->pr_tsize;
+
 	error = elf_getfiles(lp, fp, cfi, psinfo->pr_nfiles);
+	if (error)
+		goto done;
+
+	error = elf_getmaps(vnh, psinfo->pr_nmaps);
 
  done:	
 	TRACE_EXIT;
@@ -485,7 +507,7 @@ elf_getnote(void *src, size_t *off, const char *name, unsigned int type,
 
 static int
 elf_demarshalprocnotes(void *src, size_t *off, prpsinfo_t *psinfo,
-	struct ckpt_fileinfo** cfi)
+	struct ckpt_fileinfo** cfi, struct vn_hdr** vnh)
 {
 	int error;
 
@@ -505,6 +527,16 @@ elf_demarshalprocnotes(void *src, size_t *off, prpsinfo_t *psinfo,
 			kfree(*cfi, M_TEMP);
 	} else
 		*cfi = NULL;
+
+	if (psinfo->pr_nmaps > 0) {
+		*vnh = kmalloc(psinfo->pr_nmaps * sizeof(struct vn_hdr), M_TEMP,
+			M_WAITOK);
+		error = elf_getnote(src, off, "DragonFly", NT_DRAGONFLY_MAPS,
+			(void **)vnh, psinfo->pr_nmaps * sizeof(struct vn_hdr));
+		if (error)
+			kfree(*vnh, M_TEMP);
+	} else
+		*vnh = NULL;
 
 	TRACE_EXIT;
 	return error;
@@ -558,6 +590,7 @@ mmap_phdr(struct file *fp, Elf_Phdr *phdr)
 	len = phdr->p_filesz;
 	addr = (void *)phdr->p_vaddr;
 	flags = MAP_FIXED | MAP_NOSYNC | MAP_PRIVATE;
+
 	prot = 0;
 	if (phdr->p_flags & PF_R)
 		prot |= PROT_READ;
@@ -568,6 +601,7 @@ mmap_phdr(struct file *fp, Elf_Phdr *phdr)
 	if ((error = fp_mmap(addr, len, prot, flags, fp, pos, &addr)) != 0) {
 		PRINTF(("mmap failed: %d\n", error);	   );
 	}
+
 	PRINTF(("map @%08"PRIxPTR"-%08"PRIxPTR" fileoff %08x-%08x\n", (uintptr_t)addr,
 		   (uintptr_t)((char *)addr + len), (int)pos, (int)(pos + len)));
 	TRACE_EXIT;
@@ -630,20 +664,54 @@ mmap_vp(struct vn_hdr *vnh)
 	Elf_Phdr *phdr;
 	struct file *fp;
 	int error;
+	int flags;
+	int prot = 0;
 	TRACE_ENTER;
 
 	phdr = &vnh->vnh_phdr;
 
 	if ((error = ckpt_fhtovp(&vnh->vnh_fh, &vp)) != 0)
 		return error;
-	/*
-	 * XXX O_RDONLY -> or O_RDWR if file is PROT_WRITE, MAP_SHARED
-	 */
-	if ((error = fp_vpopen(vp, O_RDONLY, &fp)) != 0) {
+
+	if (phdr->p_flags & PF_W && vnh->vnh_flags & MAP_SHARED)
+		flags = O_RDWR;
+	else
+		flags = O_RDONLY;
+	if ((error = fp_vpopen(vp, flags, &fp)) != 0) {
 		vput(vp);
 		return error;
 	}
-	error = mmap_phdr(fp, phdr);
+
+	switch (vnh->vnh_type) {
+		case VM_MAPTYPE_NORMAL:
+			error = mmap_phdr(fp, phdr);
+			break;
+
+		case VM_MAPTYPE_VPAGETABLE:
+			if (phdr->p_flags & PF_R)
+				prot |= PROT_READ;
+			if (phdr->p_flags & PF_W)
+				prot |= PROT_WRITE;
+			if (phdr->p_flags & PF_X)
+				prot |= PROT_EXEC;	
+
+			flags = vnh->vnh_flags | MAP_VPAGETABLE | MAP_FIXED;
+
+			error = vm_mmap(&curproc->p_vmspace->vm_map, &phdr->p_vaddr,
+				phdr->p_memsz, prot, VM_PROT_ALL, flags, fp->f_data,
+				phdr->p_offset);
+			if (!error) {
+				error = vm_map_madvise(&curproc->p_vmspace->vm_map,
+					phdr->p_vaddr, phdr->p_vaddr + phdr->p_memsz, MADV_SETMAP,
+					vnh->vnh_master_pde);
+			}
+			break;
+
+		default:
+			error = EINVAL;
+			break;
+	}
+
 	fp_close(fp);
 	TRACE_EXIT;
 	return error;
@@ -651,50 +719,19 @@ mmap_vp(struct vn_hdr *vnh)
 
 
 static int
-elf_gettextvp(struct proc *p, struct file *fp)
+elf_getmaps(struct vn_hdr *vnh, int nmaps)
 {
 	int i;
 	int error;
-	int vpcount;
-	struct ckpt_vminfo vminfo;
-	struct vn_hdr *vnh = NULL;
 
 	TRACE_ENTER;
-	if ((error = read_check(fp, &vminfo, sizeof(vminfo))) != 0)
-		goto done;
-	if (vminfo.cvm_dsize < 0 || 
-	    vminfo.cvm_dsize > p->p_rlimit[RLIMIT_DATA].rlim_cur ||
-	    vminfo.cvm_tsize < 0 ||
-	    (u_quad_t)vminfo.cvm_tsize > maxtsiz ||
-	    vminfo.cvm_daddr >= (caddr_t)VM_MAX_USER_ADDRESS ||
-	    vminfo.cvm_taddr >= (caddr_t)VM_MAX_USER_ADDRESS
-	) {
-	    error = ERANGE;
-	    goto done;
-	}
-
-	vmspace_exec(p, NULL);
-	p->p_vmspace->vm_daddr = vminfo.cvm_daddr;
-	p->p_vmspace->vm_dsize = vminfo.cvm_dsize;
-	p->p_vmspace->vm_taddr = vminfo.cvm_taddr;
-	p->p_vmspace->vm_tsize = vminfo.cvm_tsize;
-	if ((error = read_check(fp, &vpcount, sizeof(int))) != 0)
-		goto done;
-	vnh = kmalloc(sizeof(struct vn_hdr) * vpcount, M_TEMP, M_WAITOK);
-	if ((error = read_check(fp, vnh, sizeof(struct vn_hdr)*vpcount)) != 0)
-		goto done;
-	for (i = 0; i < vpcount; i++) {
+	for (i = 0; i < nmaps; i++) {
 		if ((error = mmap_vp(&vnh[i])) != 0)
-			goto done;
+			break;
 	}
-	
- done:
-	if (vnh)
-		kfree(vnh, M_TEMP);
 	TRACE_EXIT;
 	return error;
 }
-
 
 
 /* place holder */
