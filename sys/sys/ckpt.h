@@ -52,10 +52,12 @@ struct ckpt_fileinfo {
 	int		cfi_index;
 	u_int		cfi_flags;	/* saved f_flag	*/
 	off_t		cfi_offset;	/* saved f_offset */
-	fhandle_t	cfi_fh;
 	int		cfi_type;
 	int		cfi_ckflags;
-	int		cfi_reserved[6];
+	union {
+		fhandle_t		vnode;
+		int				nevents;
+	} cfi_data;
 };
 
 #define CKFIF_ISCKPTFD	0x0001

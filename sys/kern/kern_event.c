@@ -523,25 +523,41 @@ kqueue_terminate(struct kqueue *kq)
  * MPSAFE
  */
 int
-sys_kqueue(struct kqueue_args *uap)
+kqueue_create(struct file **fp, int *fd)
 {
 	struct thread *td = curthread;
 	struct kqueue *kq;
-	struct file *fp;
-	int fd, error;
+	int error;
 
-	error = falloc(td->td_lwp, &fp, &fd);
+	error = falloc(td->td_lwp, fp, fd);
 	if (error)
 		return (error);
-	fp->f_flag = FREAD | FWRITE;
-	fp->f_type = DTYPE_KQUEUE;
-	fp->f_ops = &kqueueops;
+	(*fp)->f_flag = FREAD | FWRITE;
+	(*fp)->f_type = DTYPE_KQUEUE;
+	(*fp)->f_ops = &kqueueops;
 
 	kq = kmalloc(sizeof(struct kqueue), M_KQUEUE, M_WAITOK | M_ZERO);
 	kqueue_init(kq, td->td_proc->p_fd);
-	fp->f_data = kq;
+	(*fp)->f_data = kq;
 
-	fsetfd(kq->kq_fdp, fp, fd);
+	return (error);
+}
+
+/*
+ * MPSAFE
+ */
+int
+sys_kqueue(struct kqueue_args *uap)
+{
+	struct thread *td = curthread;
+	struct file *fp;
+	int fd, error;
+
+	error = kqueue_create(&fp, &fd);
+	if (error)
+		return (error);
+
+	fsetfd(td->td_proc->p_fd, fp, fd);
 	uap->sysmsg_result = fd;
 	fdrop(fp);
 	return (error);

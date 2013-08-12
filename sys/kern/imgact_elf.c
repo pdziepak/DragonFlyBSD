@@ -952,7 +952,7 @@ static int __elfN(putnote)(elf_buf_t, const char *, int, const void *, size_t);
 static int elf_putmaps(struct proc *p, elf_buf_t target, int nmaps,
 			struct vn_hdr *vnh);
 static int elf_putfiles(struct proc *, elf_buf_t, struct file *,
-			struct ckpt_fileinfo *, int *);
+			struct ckpt_fileinfo *, int *, int *);
 
 int
 __elfN(coredump)(struct lwp *lp, int sig, struct vnode *vp, off_t limit)
@@ -1416,6 +1416,7 @@ elf_putallnotes(struct lwp *corelp, elf_buf_t target, int sig,
 	prsavetls_t *tls;
 	struct lwp *lp;
 	int nfiles;
+	int files_size;
 	int nmaps = 0;
 
 	/*
@@ -1428,8 +1429,7 @@ elf_putallnotes(struct lwp *corelp, elf_buf_t target, int sig,
 		psinfo = &tmpdata->psinfo;
 		tls = &tmpdata->tls;
 
-		cfi = kmalloc(p->p_fd->fd_nfiles * sizeof(*cfi), M_TEMP,
-			M_ZERO | M_WAITOK);
+		cfi = NULL;
 		vnh = NULL;
 	} else {
 		tmpdata = NULL;
@@ -1444,7 +1444,7 @@ elf_putallnotes(struct lwp *corelp, elf_buf_t target, int sig,
 	/*
 	 * Append LWP-agnostic note.
 	 */
-	error = elf_putfiles(p, target, fp, cfi, &nfiles);
+	error = elf_putfiles(p, target, fp, NULL, &nfiles, &files_size);
 	if (error)
 		goto exit;
 
@@ -1477,6 +1477,11 @@ elf_putallnotes(struct lwp *corelp, elf_buf_t target, int sig,
 		psinfo->pr_daddr = p->p_vmspace->vm_daddr;
 		psinfo->pr_taddr = p->p_vmspace->vm_taddr;
 
+		cfi = kmalloc(files_size, M_TEMP, M_ZERO | M_WAITOK);
+		error = elf_putfiles(p, target, fp, cfi, &nfiles, NULL);
+		if (error)
+			goto exit;
+
 		vnh = kmalloc(nmaps * sizeof(*vnh), M_TEMP, M_ZERO | M_WAITOK);
 		error = elf_putmaps(p, target, nmaps, vnh);
 		if (error)
@@ -1489,7 +1494,7 @@ elf_putallnotes(struct lwp *corelp, elf_buf_t target, int sig,
 		goto exit;
 	if (nfiles > 0) {
 		error = __elfN(putnote)(target, "DragonFly", NT_DRAGONFLY_FILES, cfi,
-			nfiles * sizeof(*cfi));
+			files_size);
 		if (error)
 			goto exit;
 	}
@@ -1615,12 +1620,16 @@ __elfN(putnote)(elf_buf_t target, const char *name, int type,
 
 static int
 elf_putfiles(struct proc *p, elf_buf_t target, struct file *ckfp,
-	struct ckpt_fileinfo *cfi, int *_nfiles)
+	struct ckpt_fileinfo *cfi, int *_nfiles, int *_size)
 {
 	int error = 0;
 	int i, j;
+	int size = 0;
 	struct file *fp;	
 	struct vnode *vp;
+	struct kqueue *kq;
+	struct knote *kn;
+	struct kevent *kev = NULL;
 
 	/*
 	 * ignore STDIN/STDERR/STDOUT.
@@ -1632,20 +1641,20 @@ elf_putfiles(struct proc *p, elf_buf_t target, struct file *ckfp,
 		/* 
 		 * XXX Only checkpoint vnodes for now.
 		 */
-		if (fp->f_type != DTYPE_VNODE) {
+		if (fp->f_type != DTYPE_VNODE && fp->f_type != DTYPE_KQUEUE) {
 			fdrop(fp);
 			continue;
 		}
 
 		if (cfi) {
-			cfi[j].cfi_index = -1;
-			cfi[j].cfi_type = fp->f_type;
-			cfi[j].cfi_flags = fp->f_flag;
-			cfi[j].cfi_offset = fp->f_offset;
-			cfi[j].cfi_ckflags = 0;
+			cfi->cfi_index = -1;
+			cfi->cfi_type = fp->f_type;
+			cfi->cfi_flags = fp->f_flag;
+			cfi->cfi_offset = fp->f_offset;
+			cfi->cfi_ckflags = 0;
 
 			if (fp == ckfp)
-				cfi[j].cfi_ckflags |= CKFIF_ISCKPTFD;
+				cfi->cfi_ckflags |= CKFIF_ISCKPTFD;
 			/* f_count and f_msgcount should not be saved/restored */
 			/* XXX save cred info */
 		}
@@ -1662,11 +1671,44 @@ elf_putfiles(struct proc *p, elf_buf_t target, struct file *ckfp,
 			if (vp == NULL || vp->v_mount == NULL)
 				break;
 			if (cfi) {
-				cfi[j].cfi_index = i;
-				cfi[j].cfi_fh.fh_fsid = vp->v_mount->mnt_stat.f_fsid;
-				error = VFS_VPTOFH(vp, &cfi[j].cfi_fh.fh_fid);
+				cfi->cfi_index = i;
+				cfi->cfi_data.vnode.fh_fsid = vp->v_mount->mnt_stat.f_fsid;
+				error = VFS_VPTOFH(vp, &cfi->cfi_data.vnode.fh_fid);
+				cfi++;
 			}
 			j++;
+			size += sizeof(struct ckpt_fileinfo);
+			break;
+		case DTYPE_KQUEUE:
+			kq = (struct kqueue *)fp->f_data;
+
+			if (cfi) {
+				cfi->cfi_index = i;
+				kev = (struct kevent *)(cfi + 1);
+			}
+			TAILQ_FOREACH(kn, &kq->kq_knlist, kn_kqlink) {
+				size += sizeof(struct kevent);
+				if (cfi) {
+					cfi->cfi_data.nevents++;
+					bcopy(&kn->kn_kevent, kev, sizeof(struct kevent));
+					kev->fflags = kn->kn_sfflags;
+					kev->data = kn->kn_sdata;
+					if ((kn->kn_status & KN_DISABLED) != 0) {
+						kev->flags &= ~EV_ENABLE;
+						kev->flags |= EV_DISABLE;
+					} else {
+						kev->flags |= EV_ENABLE;
+						kev->flags &= ~EV_DISABLE;
+					}
+					kev->flags |= EV_ADD;
+
+					kev++;
+				}
+			}
+			if (cfi)
+				cfi = (struct ckpt_fileinfo *)kev;
+			j++;
+			size += sizeof(struct ckpt_fileinfo);
 			break;
 		default:
 			break;
@@ -1674,6 +1716,8 @@ elf_putfiles(struct proc *p, elf_buf_t target, struct file *ckfp,
 		fdrop(fp);
 	}
 	
+	if (_size)
+		*_size = size;
 	*_nfiles = j;
 	return (error);
 }

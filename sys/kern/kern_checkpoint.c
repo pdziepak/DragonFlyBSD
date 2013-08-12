@@ -80,10 +80,10 @@ static int elf_getnotes(struct lwp *lp, struct file *fp, size_t notesz,
 		 prstatus_t **_status, prfpregset_t **_fpregset, prsavetls_t **_tls,
 		 int *_nthreads);
 static int elf_demarshalprocnotes(void *src, size_t *off, prpsinfo_t *psinfo,
-		 struct ckpt_fileinfo **cfi, struct vn_hdr **vnh);
+		 struct ckpt_fileinfo **cfi, size_t *cfisize, struct vn_hdr **vnh);
 static int elf_loadprocnotes(struct lwp *lp, struct file *fp,
-		 prpsinfo_t *psinfo, struct ckpt_fileinfo *cfi, struct vn_hdr *vnh,
-		 int *nthreads);
+		 prpsinfo_t *psinfo, struct ckpt_fileinfo *cfi, int cfisize,
+		 struct vn_hdr *vnh, int *nthreads);
 static int elf_demarshallwpnotes(void *src, size_t *off, prstatus_t *status,
 		 prfpregset_t *fpregset, prsavetls_t *tls, int nthreads);
 static int elf_loadlwpnotes(struct lwp *, prstatus_t *, prfpregset_t *,
@@ -91,7 +91,7 @@ static int elf_loadlwpnotes(struct lwp *, prstatus_t *, prfpregset_t *,
 static int elf_recreatelwps(struct lwp *mainlp, prstatus_t *status,
 		 prfpregset_t *fpregset, prsavetls_t *tls, int nthreads);
 static int elf_getfiles(struct lwp *lp, struct file *fp,
-		 struct ckpt_fileinfo *cfi, int nfiles);
+		 struct ckpt_fileinfo *cfi, int cfisize, int nfiles);
 static int elf_getmaps(struct vn_hdr *vnh, int nmaps);
 static char *ckpt_expand_name(const char *name, uid_t uid, pid_t pid);
 
@@ -199,6 +199,7 @@ elf_getnotes(struct lwp *lp, struct file *fp, size_t notesz,
 	prfpregset_t *fpregset;
 	prsavetls_t *tls;
 	struct ckpt_fileinfo *cfi = NULL;
+	size_t cfisize;
 	struct vn_hdr *vnh = NULL;
 
 	psinfo  = kmalloc(sizeof(prpsinfo_t), M_TEMP, M_ZERO | M_WAITOK);
@@ -207,10 +208,10 @@ elf_getnotes(struct lwp *lp, struct file *fp, size_t notesz,
 	PRINTF(("reading notes section\n"));
 	if ((error = read_check(fp, note, notesz)) != 0)
 		goto done;
-	error = elf_demarshalprocnotes(note, &off, psinfo, &cfi, &vnh);
+	error = elf_demarshalprocnotes(note, &off, psinfo, &cfi, &cfisize, &vnh);
 	if (error)
 		goto done;
-	error = elf_loadprocnotes(lp, fp, psinfo, cfi, vnh, &nthreads);
+	error = elf_loadprocnotes(lp, fp, psinfo, cfi, cfisize, vnh, &nthreads);
 	if (error)
 		goto done;
 
@@ -379,7 +380,7 @@ done:
 
 static int
 elf_loadprocnotes(struct lwp *lp, struct file *fp, prpsinfo_t *psinfo,
-	struct ckpt_fileinfo *cfi, struct vn_hdr *vnh, int *nthreads)
+	struct ckpt_fileinfo *cfi, int cfisize, struct vn_hdr *vnh, int *nthreads)
 {
 	struct proc *p = lp->lwp_proc;
 	int error = 0;
@@ -419,7 +420,7 @@ elf_loadprocnotes(struct lwp *lp, struct file *fp, prpsinfo_t *psinfo,
 	p->p_vmspace->vm_taddr = psinfo->pr_taddr;
 	p->p_vmspace->vm_tsize = psinfo->pr_tsize;
 
-	error = elf_getfiles(lp, fp, cfi, psinfo->pr_nfiles);
+	error = elf_getfiles(lp, fp, cfi, cfisize, psinfo->pr_nfiles);
 	if (error)
 		goto done;
 
@@ -516,7 +517,7 @@ elf_getnote(void *src, size_t *off, const char *name, unsigned int type,
 
 static int
 elf_demarshalprocnotes(void *src, size_t *off, prpsinfo_t *psinfo,
-	struct ckpt_fileinfo** cfi, struct vn_hdr** vnh)
+	struct ckpt_fileinfo** cfi, size_t *cfisize, struct vn_hdr** vnh)
 {
 	int error;
 
@@ -527,24 +528,22 @@ elf_demarshalprocnotes(void *src, size_t *off, prpsinfo_t *psinfo,
 	if (error)
 		return error;
 
+	*cfi = NULL;
 	if (psinfo->pr_nfiles > 0) {
-		*cfi = kmalloc(psinfo->pr_nfiles * sizeof(struct ckpt_fileinfo), M_TEMP,
-			M_WAITOK);
 		error = elf_getnote(src, off, "DragonFly", NT_DRAGONFLY_FILES,
-			(void **)cfi, psinfo->pr_nfiles * sizeof(struct ckpt_fileinfo),
-			NULL);
-		if (error)
-			kfree(*cfi, M_TEMP);
-	} else
-		*cfi = NULL;
+			(void **)cfi, 0, cfisize);
+	}
 
 	if (psinfo->pr_nmaps > 0) {
 		*vnh = kmalloc(psinfo->pr_nmaps * sizeof(struct vn_hdr), M_TEMP,
 			M_WAITOK);
 		error = elf_getnote(src, off, "DragonFly", NT_DRAGONFLY_MAPS,
 			(void **)vnh, psinfo->pr_nmaps * sizeof(struct vn_hdr), NULL);
-		if (error)
+		if (error) {
+			if (*cfi)
+				kfree(*cfi, M_TEMP);
 			kfree(*vnh, M_TEMP);
+		}
 	} else
 		*vnh = NULL;
 
@@ -747,15 +746,18 @@ elf_getmaps(struct vn_hdr *vnh, int nmaps)
 /* place holder */
 static int
 elf_getfiles(struct lwp *lp, struct file *fp, struct ckpt_fileinfo *cfi_base,
-	int filecount)
+	int cfisize, int filecount)
 {
 	int error;
-	int i;
+	int i, j;
 	int fd;
 	struct filedesc *fdp = lp->lwp_proc->p_fd;
 	struct vnode *vp;
 	struct file *tempfp;
 	struct file *ofp;
+	struct kqueue *kq;
+	struct kevent *kev = NULL;
+	struct ckpt_fileinfo *cfi = cfi_base;
 
 	TRACE_ENTER;
 
@@ -773,35 +775,68 @@ elf_getfiles(struct lwp *lp, struct file *fp, struct ckpt_fileinfo *cfi_base,
 	 * Scan files to load
 	 */
 	for (i = 0; i < filecount; i++) {
-		struct ckpt_fileinfo *cfi= &cfi_base[i];
 		/*
 		 * Ignore placeholder entries where cfi_index is less then
 		 * zero.  This will occur if the elf core dump code thinks
 		 * it can save a vnode but winds up not being able to.
 		 */
-		if (cfi->cfi_index < 0)
+		if (cfi->cfi_index < 0) {
+			cfi++;
 			continue;
-
-		/*
-		 * Restore a saved file descriptor.  If CKFIF_ISCKPTFD is 
-		 * set the descriptor represents the checkpoint file itself,
-		 * probably due to the user calling sys_checkpoint().  We
-		 * want to use the fp being used to restore the checkpoint
-		 * instead of trying to restore the original filehandle.
-		 */
-		if (cfi->cfi_ckflags & CKFIF_ISCKPTFD) {
-			fhold(fp);
-			tempfp = fp;
-			error = 0;
-		} else {
-			error = ckpt_fhtovp(&cfi->cfi_fh, &vp);
-			if (error == 0) {
-				error = fp_vpopen(vp, OFLAGS(cfi->cfi_flags),
-						  &tempfp);
-				if (error)
-					vput(vp);
-			}
 		}
+
+		if (cfi->cfi_type != DTYPE_VNODE && cfi->cfi_type != DTYPE_KQUEUE)
+			break;
+
+		switch (cfi->cfi_type) {
+		case DTYPE_VNODE:
+			/*
+			 * Restore a saved file descriptor.  If CKFIF_ISCKPTFD is 
+			 * set the descriptor represents the checkpoint file itself,
+			 * probably due to the user calling sys_checkpoint().  We
+			 * want to use the fp being used to restore the checkpoint
+			 * instead of trying to restore the original filehandle.
+			 */
+			if (cfi->cfi_ckflags & CKFIF_ISCKPTFD) {
+				fhold(fp);
+				tempfp = fp;
+				error = 0;
+			} else {
+				error = ckpt_fhtovp(&cfi->cfi_data.vnode, &vp);
+				if (error == 0) {
+					error = fp_vpopen(vp, OFLAGS(cfi->cfi_flags),
+							  &tempfp);
+					if (error)
+						vput(vp);
+				}
+			}
+			break;
+		case DTYPE_KQUEUE:
+			error = kqueue_create(&tempfp, NULL);
+			if (error)
+				break;
+
+			kq = (struct kqueue *)tempfp->f_data;
+			kev = (struct kevent *)(cfi + 1);
+
+			for (j = 0; j < cfi->cfi_data.nevents; j++) {
+				if ((char*)(kev + 1) > (char*)cfi_base + cfisize) {
+					fdrop(tempfp);
+					error = EINVAL;
+					break;
+				}
+
+				error = kqueue_register(kq, kev);
+				if (error) {
+					fdrop(tempfp);
+					break;
+				}
+
+				kev++;
+			}
+			break;
+		}
+
 		if (error)
 			break;
 		tempfp->f_offset = cfi->cfi_offset;
@@ -828,8 +863,18 @@ elf_getfiles(struct lwp *lp, struct file *fp, struct ckpt_fileinfo *cfi_base,
 		KKASSERT(fd == cfi->cfi_index);
 		fsetfd(fdp, tempfp, fd);
 		fdrop(tempfp);
-		cfi++;
+		kern_fcntl(fd, F_SETFL, (union fcntl_dat *)&cfi->cfi_flags,
+			curthread->td_ucred);
 		PRINTF(("restoring %d\n", cfi->cfi_index));
+
+		switch (cfi->cfi_type) {
+		case DTYPE_VNODE:
+			cfi++;
+			break;
+		case DTYPE_KQUEUE:
+			cfi = (struct ckpt_fileinfo *)kev;
+			break;
+		}
 	}
 
  done:

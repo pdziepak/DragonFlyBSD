@@ -235,6 +235,7 @@ extern void	knote_assume_knotes(struct kqinfo *, struct kqinfo *,
 extern void	knote_fdclose(struct file *fp, struct filedesc *fdp, int fd);
 extern void	kqueue_init(struct kqueue *kq, struct filedesc *fdp);
 extern void	kqueue_terminate(struct kqueue *kq);
+extern int	kqueue_create(struct file **fp, int *fd);
 extern int 	kqueue_register(struct kqueue *kq, struct kevent *kev);
 
 #endif 	/* _KERNEL */
