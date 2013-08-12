@@ -466,7 +466,7 @@ elf_loadlwpnotes(struct lwp *lp, prstatus_t *status, prfpregset_t *fpregset,
 
 static int 
 elf_getnote(void *src, size_t *off, const char *name, unsigned int type,
-	    void **desc, size_t descsz) 
+	    void **desc, size_t descsz, size_t *size) 
 {
 	Elf_Note note;
 	int error;
@@ -491,13 +491,22 @@ elf_getnote(void *src, size_t *off, const char *name, unsigned int type,
 		goto done;
 	}
 	*off += roundup2(note.n_namesz, sizeof(Elf_Word));
-	if (note.n_descsz != descsz) {
+	if (descsz && note.n_descsz != descsz) {
 		TRACE_ERR;
 		error = EINVAL;
 		goto done;
+	} else if (!descsz) {
+		*desc = kmalloc(note.n_descsz, M_TEMP, M_NOWAIT);
+		if (!*desc) {
+			TRACE_ERR;
+			error = ENOMEM;
+			goto done;
+		}
 	}
 	if (desc)
 	        bcopy((char *)src + *off, *desc, note.n_descsz);
+	if (size)
+			*size = note.n_descsz;
 	*off += roundup2(note.n_descsz, sizeof(Elf_Word));
 	error = 0;
  done:
@@ -514,7 +523,7 @@ elf_demarshalprocnotes(void *src, size_t *off, prpsinfo_t *psinfo,
 	TRACE_ENTER;
 
 	error = elf_getnote(src, off, "CORE", NT_PRPSINFO, (void **)&psinfo,
-		sizeof(prpsinfo_t));
+		sizeof(prpsinfo_t), NULL);
 	if (error)
 		return error;
 
@@ -522,7 +531,8 @@ elf_demarshalprocnotes(void *src, size_t *off, prpsinfo_t *psinfo,
 		*cfi = kmalloc(psinfo->pr_nfiles * sizeof(struct ckpt_fileinfo), M_TEMP,
 			M_WAITOK);
 		error = elf_getnote(src, off, "DragonFly", NT_DRAGONFLY_FILES,
-			(void **)cfi, psinfo->pr_nfiles * sizeof(struct ckpt_fileinfo));
+			(void **)cfi, psinfo->pr_nfiles * sizeof(struct ckpt_fileinfo),
+			NULL);
 		if (error)
 			kfree(*cfi, M_TEMP);
 	} else
@@ -532,7 +542,7 @@ elf_demarshalprocnotes(void *src, size_t *off, prpsinfo_t *psinfo,
 		*vnh = kmalloc(psinfo->pr_nmaps * sizeof(struct vn_hdr), M_TEMP,
 			M_WAITOK);
 		error = elf_getnote(src, off, "DragonFly", NT_DRAGONFLY_MAPS,
-			(void **)vnh, psinfo->pr_nmaps * sizeof(struct vn_hdr));
+			(void **)vnh, psinfo->pr_nmaps * sizeof(struct vn_hdr), NULL);
 		if (error)
 			kfree(*vnh, M_TEMP);
 	} else
@@ -554,15 +564,15 @@ elf_demarshallwpnotes(void *src, size_t *off, prstatus_t *status,
 
 	for (i = 0 ; i < nthreads; i++) {
 		error = elf_getnote(src, off, "CORE", NT_PRSTATUS, (void **)&status,
-			sizeof (prstatus_t));
+			sizeof (prstatus_t), NULL);
 		if (error)
 			goto done;
 		error = elf_getnote(src, off, "CORE", NT_FPREGSET, (void **)&fpregset,
-			sizeof(prfpregset_t));
+			sizeof(prfpregset_t), NULL);
 		if (error)
 			goto done;
 		error = elf_getnote(src, off, "DragonFly", NT_DRAGONFLY_TLS,
-			(void **)&tls, sizeof(prsavetls_t));
+			(void **)&tls, sizeof(prsavetls_t), NULL);
 		if (error)
 			goto done;
 
