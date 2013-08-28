@@ -1503,8 +1503,11 @@ netif_restore(void)
 
 static
 void
-ckpt_sighandler(int sig)
+ckpt_sighandler(int sig, siginfo_t *info, void *ctxp)
 {
+	ucontext_t *ctx = ctxp;
+	struct trapframe *tf = (struct trapframe *)&ctx->uc_mcontext.mc_rdi;
+	struct proc *p;
 	struct termios tio;
 	int error;
 
@@ -1515,7 +1518,6 @@ ckpt_sighandler(int sig)
 	}
 
 	vcons_save_mode(&tio);
-
 	msync((void*)KvaStart, KERNEL_KVA_SIZE, MS_SYNC);
 	error = sys_checkpoint(CKPT_FREEZE, -1, -1, -1);
 	if (error == 0)
@@ -1528,7 +1530,17 @@ ckpt_sighandler(int sig)
 	netif_restore();
 	vcons_restore_mode(&tio);
 
+	kprintf("Restoring vmspaces...\n");
+	for (p = LIST_FIRST(&allproc); p != NULL; p = LIST_NEXT(p, p_list)) {  
+		PHOLD(p);
+		if (p->p_pid)
+			cpu_vmspace_alloc(p->p_vmspace);
+		PRELE(p);
+	}
+
 	kprintf("Restored from checkpoint...\n");
+	vmspace_ctl(&curproc->p_vmspace->vm_pmap, VMSPACE_CTL_RUN, tf,
+		&curthread->td_savevext);
 }
 
 static
@@ -1554,8 +1566,8 @@ init_checkpoint(void)
 	}
 
 	bzero(&sa, sizeof(sa));
-	sa.sa_flags = SA_ONSTACK;
-	sa.sa_handler = ckpt_sighandler;
+	sa.sa_flags = SA_ONSTACK | SA_SIGINFO;
+	sa.sa_sigaction = ckpt_sighandler;
 	sigemptyset(&sa.sa_mask);
 
 	if (sigaction(SIGCKPT, &sa, NULL) || sigaction(SIGCKPTEXIT, &sa, NULL)) {
