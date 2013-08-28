@@ -112,6 +112,7 @@ void go_user (struct intrframe *frame);
 
 void init_exceptions(void);
 void init_kqueue(void);
+void kqueue_update_pid(void);
 void init_fpu(int supports_sse);
 void kern_trap(struct trapframe *);
 void user_trap(struct trapframe *);

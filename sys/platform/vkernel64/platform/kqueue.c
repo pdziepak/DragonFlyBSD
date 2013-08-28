@@ -61,7 +61,7 @@ struct kqueue_info {
 
 static void kqueuesig(int signo);
 static void kqueue_intr(void *arg __unused, void *frame __unused);
-
+extern void reinit_kqueue(void);
 static int KQueueFd = -1;
 static void *VIntr1;
 
@@ -91,12 +91,20 @@ init_kqueue(void)
 		panic("Cannot configure kqueue for SIGIO, update your kernel");
 }
 
+void
+kqueue_update_pid(void)
+{
+	if (fcntl(KQueueFd, F_SETOWN, getpid()) < 0)
+		panic("Cannot configure kqueue for SIGIO, update your kernel");
+}
+
 /*
  * Signal handler dispatches interrupt thread.  Use interrupt #1
  */
 static void
 kqueuesig(int signo)
 {
+//	kprintf("IO\n");
 	signalintr(1);
 }
 

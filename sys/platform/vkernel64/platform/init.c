@@ -1527,6 +1527,7 @@ ckpt_sighandler(int sig, siginfo_t *info, void *ctxp)
 		return;
 	}
 
+	kqueue_update_pid();
 	netif_restore();
 	vcons_restore_mode(&tio);
 
