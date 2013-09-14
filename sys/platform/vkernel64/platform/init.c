@@ -1517,6 +1517,7 @@ ckpt_sighandler(int sig, siginfo_t *info, void *ctxp)
 
 	vcons_save_mode(&tio);
 	msync((void*)KvaStart, KERNEL_KVA_SIZE, MS_SYNC);
+	msync((void*)dmap_min_address, DMAP_SIZE, MS_SYNC);
 
 	error = sys_checkpoint(CKPT_FREEZE, -1, -1, -1);
 	if (error == 0)
