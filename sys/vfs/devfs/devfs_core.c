@@ -819,7 +819,8 @@ devfs_inode_to_vnode(struct mount *mp, ino_t target)
 	msg->mdv_ino.ino = target;
 	msg = devfs_msg_send_sync(DEVFS_INODE_TO_VNODE, msg);
 	vp = msg->mdv_ino.vp;
-	vn_lock(vp, LK_EXCLUSIVE | LK_RETRY);
+	if (vp)
+		vn_lock(vp, LK_EXCLUSIVE | LK_RETRY);
 	devfs_msg_put(msg);
 
 	return vp;
