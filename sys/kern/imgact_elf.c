@@ -1220,8 +1220,8 @@ each_segment(struct proc *p, segment_callback func, void *closure, int writable)
 		 * MAP_NOCORE is set in mmap(2) or MADV_NOCORE in
 		 * madvise(2).
 		 *
-		 * Currently we only dump normal VM object maps.  We do
-		 * not dump submaps or virtual page tables.
+		 * Currently we only dump normal VM object maps and
+		 * virtual page table maps.  We do not dump submaps.
 		 */
 		if (writable && (entry->eflags & MAP_ENTRY_NOCOREDUMP))
 			continue;
