@@ -585,20 +585,22 @@ elf_demarshallwpnotes(void *src, size_t *off, prstatus_t *status,
 
 
 static int
-mmap_phdr(struct file *fp, Elf_Phdr *phdr) 
+mmap_phdr(struct file *fp, Elf_Phdr *phdr, int flags) 
 {
 	int error;
 	size_t len;
 	int prot;
 	void *addr;
-	int flags;
 	off_t pos;
 
 	TRACE_ENTER;
 	pos = phdr->p_offset;
 	len = phdr->p_filesz;
 	addr = (void *)phdr->p_vaddr;
-	flags = MAP_FIXED | MAP_NOSYNC | MAP_PRIVATE;
+
+	if (!flags)
+		flags = MAP_NOSYNC | MAP_PRIVATE;
+	flags |= MAP_FIXED;
 
 	prot = 0;
 	if (phdr->p_flags & PF_R)
@@ -611,8 +613,8 @@ mmap_phdr(struct file *fp, Elf_Phdr *phdr)
 		PRINTF(("mmap failed: %d\n", error);	   );
 	}
 
-	PRINTF(("map @%08"PRIxPTR"-%08"PRIxPTR" fileoff %08x-%08x\n", (uintptr_t)addr,
-		   (uintptr_t)((char *)addr + len), (int)pos, (int)(pos + len)));
+	PRINTF(("map @%08"PRIxPTR"-%08"PRIxPTR" fileoff %08x-%08x flags %d\n", (uintptr_t)addr,
+		   (uintptr_t)((char *)addr + len), (int)pos, (int)(pos + len), (int)flags));
 	TRACE_EXIT;
 	return error;
 }
@@ -629,7 +631,7 @@ elf_loadphdrs(struct file *fp, Elf_Phdr *phdr, int numsegs)
 
 	TRACE_ENTER;
 	for (i = 1; i < numsegs; i++)  {
-		if ((error = mmap_phdr(fp, &phdr[i])) != 0)
+		if ((error = mmap_phdr(fp, &phdr[i], 0)) != 0)
 			break;
 	}
 	TRACE_EXIT;
@@ -673,7 +675,8 @@ mmap_vp(struct vn_hdr *vnh)
 	Elf_Phdr *phdr;
 	struct file *fp;
 	int error;
-	int flags;
+	int flags = 0;
+	int fflags;
 	int prot = 0;
 	TRACE_ENTER;
 
@@ -682,18 +685,29 @@ mmap_vp(struct vn_hdr *vnh)
 	if ((error = ckpt_fhtovp(&vnh->vnh_fh, &vp)) != 0)
 		return error;
 
-	if (phdr->p_flags & PF_W && vnh->vnh_flags & MAP_SHARED)
-		flags = O_RDWR;
+	if (vnh->vnh_flags & MAP_ENTRY_COW)
+		flags |= MAP_PRIVATE;
 	else
-		flags = O_RDONLY;
-	if ((error = fp_vpopen(vp, flags, &fp)) != 0) {
+		flags |= MAP_SHARED;
+	if (vnh->vnh_flags & MAP_ENTRY_NOCOREDUMP)
+		flags |= MAP_NOCORE;
+	if (vnh->vnh_flags & MAP_ENTRY_NOSYNC)
+		flags |= MAP_NOSYNC;
+	if (vnh->vnh_flags & MAP_ENTRY_STACK)
+		flags |= MAP_STACK;
+
+	if ((phdr->p_flags & PF_W) && (flags & MAP_SHARED))
+		fflags = O_RDWR;
+	else
+		fflags = O_RDONLY;
+	if ((error = fp_vpopen(vp, fflags, &fp)) != 0) {
 		vput(vp);
 		return error;
 	}
 
 	switch (vnh->vnh_type) {
 		case VM_MAPTYPE_NORMAL:
-			error = mmap_phdr(fp, phdr);
+			error = mmap_phdr(fp, phdr, flags);
 			break;
 
 		case VM_MAPTYPE_VPAGETABLE:
@@ -704,7 +718,7 @@ mmap_vp(struct vn_hdr *vnh)
 			if (phdr->p_flags & PF_X)
 				prot |= PROT_EXEC;	
 
-			flags = vnh->vnh_flags | MAP_VPAGETABLE | MAP_FIXED;
+			flags |= MAP_VPAGETABLE | MAP_FIXED;
 
 			error = vm_mmap(&curproc->p_vmspace->vm_map, &phdr->p_vaddr,
 				phdr->p_memsz, prot, VM_PROT_ALL, flags, fp->f_data,
@@ -714,11 +728,27 @@ mmap_vp(struct vn_hdr *vnh)
 					phdr->p_vaddr, phdr->p_vaddr + phdr->p_memsz, MADV_SETMAP,
 					vnh->vnh_master_pde);
 			}
+
+			PRINTF(("map vpagetable @%08"PRIxPTR"-%08"PRIxPTR" fileoff"	\
+				"%08x-%08x flags %d\n", (uintptr_t)phdr->p_vaddr,
+				(uintptr_t)((char *)phdr->p_vaddr + phdr->p_memsz),
+				(int)phdr->p_offset, (int)(phdr->p_offset + phdr->p_memsz),
+				(int)flags));
 			break;
 
 		default:
 			error = EINVAL;
 			break;
+	}
+
+	flags = 0;
+	if (vnh->vnh_flags & MAP_ENTRY_BEHAV_SEQUENTIAL)
+		flags = MADV_SEQUENTIAL;
+	else if (vnh->vnh_flags & MAP_ENTRY_BEHAV_RANDOM)
+		flags = MADV_RANDOM;
+	if (flags) {
+		error = vm_map_madvise(&curproc->p_vmspace->vm_map, phdr->p_vaddr,
+			phdr->p_vaddr + phdr->p_memsz, flags, 0);
 	}
 
 	fp_close(fp);
