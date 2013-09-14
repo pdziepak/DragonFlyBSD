@@ -1505,8 +1505,6 @@ static
 void
 ckpt_sighandler(int sig, siginfo_t *info, void *ctxp)
 {
-	ucontext_t *ctx = ctxp;
-	struct trapframe *tf = (struct trapframe *)&ctx->uc_mcontext.mc_rdi;
 	struct proc *p;
 	struct termios tio;
 	int error;
@@ -1519,6 +1517,7 @@ ckpt_sighandler(int sig, siginfo_t *info, void *ctxp)
 
 	vcons_save_mode(&tio);
 	msync((void*)KvaStart, KERNEL_KVA_SIZE, MS_SYNC);
+
 	error = sys_checkpoint(CKPT_FREEZE, -1, -1, -1);
 	if (error == 0)
 		exit(0);
@@ -1540,8 +1539,6 @@ ckpt_sighandler(int sig, siginfo_t *info, void *ctxp)
 	}
 
 	kprintf("Restored from checkpoint...\n");
-	vmspace_ctl(&curproc->p_vmspace->vm_pmap, VMSPACE_CTL_RUN, tf,
-		&curthread->td_savevext);
 }
 
 static
