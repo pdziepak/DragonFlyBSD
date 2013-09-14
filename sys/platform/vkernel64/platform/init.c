@@ -1459,6 +1459,15 @@ init_netif(char *netifExp[], int netifExpNum)
 
 static
 void
+netif_close(void)
+{
+	int i;
+	for (i = 0; i < VKNETIF_MAX; i++)
+		close(NetifInfo[i].tap_fd);
+}
+
+static
+void
 netif_restore(void)
 {
 	int i, s;
@@ -1516,6 +1525,8 @@ ckpt_sighandler(int sig, siginfo_t *info, void *ctxp)
 	}
 
 	vcons_save_mode(&tio);
+	netif_close();
+
 	msync((void*)KvaStart, KERNEL_KVA_SIZE, MS_SYNC);
 	msync((void*)dmap_min_address, DMAP_SIZE, MS_SYNC);
 
