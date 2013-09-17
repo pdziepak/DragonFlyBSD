@@ -1513,10 +1513,18 @@ netif_restore(void)
 }
 
 static
+int
+restore_vmspace(struct proc *p, void *dummy)
+{
+	if (p->p_pid)
+		cpu_vmspace_alloc(p->p_vmspace);
+	return 0;
+}
+
+static
 void
 ckpt_sighandler(int sig, siginfo_t *info, void *ctxp)
 {
-	struct proc *p;
 	struct termios tio;
 	int error;
 
@@ -1548,12 +1556,8 @@ ckpt_sighandler(int sig, siginfo_t *info, void *ctxp)
 	vcons_restore_mode(&tio);
 
 	kprintf("Restoring vmspaces...\n");
-	LIST_FOREACH(p, &allproc, p_list) {
-		PHOLD(p);
-		if (p->p_pid)
-			cpu_vmspace_alloc(p->p_vmspace);
-		PRELE(p);
-	}
+	allproc_scan(restore_vmspace, NULL);
+	zombproc_scan(restore_vmspace, NULL);
 
 	kprintf("Restored from checkpoint...\n");
 	restart_cpus(stopped_cpus);
