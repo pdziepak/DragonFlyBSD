@@ -482,20 +482,21 @@ elf_getnote(void *src, size_t *off, size_t notesz, const char *name,
 		goto done;
 	}
 
-	if (*off + sizeof(note) > notesz) {
-		error = EINVAL;
-		goto done;
-	}
-	bcopy((char *)src + *off, &note, sizeof note);
+	do {
+		if (*off + sizeof(note) > notesz) {
+			error = EINVAL;
+			goto done;
+		}
+		bcopy((char *)src + *off, &note, sizeof note);
 	
-	PRINTF(("at offset: %zd expected note of type: %d - got: %d\n",
-	       *off, type, note.n_type));
-	*off += sizeof note;
-	if (type != note.n_type) {
-		TRACE_ERR;
-		error = EINVAL;
-		goto done;
-	}
+		PRINTF(("at offset: %zd expected note of type: %d - got: %d\n",
+			   *off, type, note.n_type));
+		*off += sizeof note;
+		if (type != note.n_type) {
+			*off += roundup2(note.n_namesz, sizeof(Elf_Word));
+			*off += roundup2(note.n_descsz, sizeof(Elf_Word));
+		}
+	} while (type != note.n_type);
 	if (*off + note.n_namesz > notesz) {
 		error = EINVAL;
 		goto done;
