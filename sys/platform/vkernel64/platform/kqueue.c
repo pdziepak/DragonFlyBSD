@@ -104,7 +104,6 @@ kqueue_update_pid(void)
 static void
 kqueuesig(int signo)
 {
-//	kprintf("IO\n");
 	signalintr(1);
 }
 
