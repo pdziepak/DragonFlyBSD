@@ -492,12 +492,14 @@ elf_getnote(void *src, size_t *off, const char *name, unsigned int type,
 		goto done;
 	}
 	*off += roundup2(note.n_namesz, sizeof(Elf_Word));
-	if (descsz && note.n_descsz != descsz) {
+	if (!size && note.n_descsz != descsz) {
 		TRACE_ERR;
 		error = EINVAL;
 		goto done;
-	} else if (!descsz) {
+	}
+	if (!descsz) {
 		*desc = kmalloc(note.n_descsz, M_TEMP, M_NOWAIT);
+		descsz = note.n_descsz;
 		if (!*desc) {
 			TRACE_ERR;
 			error = ENOMEM;
@@ -505,7 +507,7 @@ elf_getnote(void *src, size_t *off, const char *name, unsigned int type,
 		}
 	}
 	if (desc)
-	        bcopy((char *)src + *off, *desc, note.n_descsz);
+	        bcopy((char *)src + *off, *desc, descsz);
 	if (size)
 			*size = note.n_descsz;
 	*off += roundup2(note.n_descsz, sizeof(Elf_Word));
@@ -520,13 +522,20 @@ elf_demarshalprocnotes(void *src, size_t *off, prpsinfo_t *psinfo,
 	struct ckpt_fileinfo** cfi, size_t *cfisize, struct vn_hdr** vnh)
 {
 	int error;
+	size_t size;
 
 	TRACE_ENTER;
 
+	size = sizeof(prpsinfo_t);
 	error = elf_getnote(src, off, "CORE", NT_PRPSINFO, (void **)&psinfo,
-		sizeof(prpsinfo_t), NULL);
+		sizeof(prpsinfo_t), &size);
 	if (error)
 		return error;
+	if (size < sizeof(prpsinfo_t)) {
+		TRACE_ERR;
+		error = EINVAL;
+		goto done;
+	}
 
 	*cfi = NULL;
 	if (psinfo->pr_nfiles > 0) {
@@ -547,6 +556,7 @@ elf_demarshalprocnotes(void *src, size_t *off, prpsinfo_t *psinfo,
 	} else
 		*vnh = NULL;
 
+ done:
 	TRACE_EXIT;
 	return error;
 }
@@ -558,14 +568,21 @@ elf_demarshallwpnotes(void *src, size_t *off, prstatus_t *status,
 {
 	int i;
 	int error;
+	size_t size;
 
 	TRACE_ENTER;
 
 	for (i = 0 ; i < nthreads; i++) {
+		size = sizeof(prstatus_t);
 		error = elf_getnote(src, off, "CORE", NT_PRSTATUS, (void **)&status,
-			sizeof (prstatus_t), NULL);
+			sizeof(prstatus_t), &size);
 		if (error)
 			goto done;
+		if (size < sizeof(prstatus_t)) {
+			TRACE_ERR;
+			error = EINVAL;
+			goto done;
+		}
 		error = elf_getnote(src, off, "CORE", NT_FPREGSET, (void **)&fpregset,
 			sizeof(prfpregset_t), NULL);
 		if (error)
