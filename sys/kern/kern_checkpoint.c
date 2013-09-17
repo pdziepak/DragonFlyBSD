@@ -79,13 +79,15 @@ static int elf_loadphdrs(struct file *fp,  Elf_Phdr *phdr, int numsegs);
 static int elf_getnotes(struct lwp *lp, struct file *fp, size_t notesz,
 		 prstatus_t **_status, prfpregset_t **_fpregset, prsavetls_t **_tls,
 		 int *_nthreads);
-static int elf_demarshalprocnotes(void *src, size_t *off, prpsinfo_t *psinfo,
-		 struct ckpt_fileinfo **cfi, size_t *cfisize, struct vn_hdr **vnh);
+static int elf_demarshalprocnotes(void *src, size_t *off, size_t notesz,
+		 prpsinfo_t *psinfo, struct ckpt_fileinfo **cfi, size_t *cfisize,
+		 struct vn_hdr **vnh);
 static int elf_loadprocnotes(struct lwp *lp, struct file *fp,
 		 prpsinfo_t *psinfo, struct ckpt_fileinfo *cfi, int cfisize,
 		 struct vn_hdr *vnh, int *nthreads);
-static int elf_demarshallwpnotes(void *src, size_t *off, prstatus_t *status,
-		 prfpregset_t *fpregset, prsavetls_t *tls, int nthreads);
+static int elf_demarshallwpnotes(void *src, size_t *off, size_t notesz,
+		 prstatus_t *status, prfpregset_t *fpregset, prsavetls_t *tls,
+		 int nthreads);
 static int elf_loadlwpnotes(struct lwp *, prstatus_t *, prfpregset_t *,
 		 prsavetls_t *);
 static int elf_recreatelwps(struct lwp *mainlp, prstatus_t *status,
@@ -208,7 +210,8 @@ elf_getnotes(struct lwp *lp, struct file *fp, size_t notesz,
 	PRINTF(("reading notes section\n"));
 	if ((error = read_check(fp, note, notesz)) != 0)
 		goto done;
-	error = elf_demarshalprocnotes(note, &off, psinfo, &cfi, &cfisize, &vnh);
+	error = elf_demarshalprocnotes(note, &off, notesz, psinfo, &cfi, &cfisize,
+		&vnh);
 	if (error)
 		goto done;
 	error = elf_loadprocnotes(lp, fp, psinfo, cfi, cfisize, vnh, &nthreads);
@@ -224,7 +227,8 @@ elf_getnotes(struct lwp *lp, struct file *fp, size_t notesz,
 	fpregset  = kmalloc(nthreads*sizeof(prfpregset_t), M_TEMP, M_WAITOK);
 	tls	= kmalloc(nthreads*sizeof(prsavetls_t), M_TEMP, M_WAITOK);
 
-	error = elf_demarshallwpnotes(note, &off, status, fpregset, tls, nthreads);
+	error = elf_demarshallwpnotes(note, &off, notesz, status, fpregset, tls,
+		nthreads);
 	if (error)
 		goto done;
 	error = elf_loadlwpnotes(lp, status, fpregset, tls);
@@ -466,8 +470,8 @@ elf_loadlwpnotes(struct lwp *lp, prstatus_t *status, prfpregset_t *fpregset,
 }
 
 static int 
-elf_getnote(void *src, size_t *off, const char *name, unsigned int type,
-	    void **desc, size_t descsz, size_t *size) 
+elf_getnote(void *src, size_t *off, size_t notesz, const char *name,
+		unsigned int type, void **desc, size_t descsz, size_t *size) 
 {
 	Elf_Note note;
 	int error;
@@ -475,6 +479,11 @@ elf_getnote(void *src, size_t *off, const char *name, unsigned int type,
 	TRACE_ENTER;
 	if (src == NULL) {
 		error = EFAULT;
+		goto done;
+	}
+
+	if (*off + sizeof(note) > notesz) {
+		error = EINVAL;
 		goto done;
 	}
 	bcopy((char *)src + *off, &note, sizeof note);
@@ -487,11 +496,19 @@ elf_getnote(void *src, size_t *off, const char *name, unsigned int type,
 		error = EINVAL;
 		goto done;
 	}
+	if (*off + note.n_namesz > notesz) {
+		error = EINVAL;
+		goto done;
+	}
 	if (strncmp(name, (char *) src + *off, note.n_namesz) != 0) {
 		error = EINVAL;
 		goto done;
 	}
 	*off += roundup2(note.n_namesz, sizeof(Elf_Word));
+	if (*off + note.n_descsz > notesz) {
+		error = EINVAL;
+		goto done;
+	}
 	if (!size && note.n_descsz != descsz) {
 		TRACE_ERR;
 		error = EINVAL;
@@ -518,8 +535,9 @@ elf_getnote(void *src, size_t *off, const char *name, unsigned int type,
 }
 
 static int
-elf_demarshalprocnotes(void *src, size_t *off, prpsinfo_t *psinfo,
-	struct ckpt_fileinfo** cfi, size_t *cfisize, struct vn_hdr** vnh)
+elf_demarshalprocnotes(void *src, size_t *off, size_t notesz,
+	prpsinfo_t *psinfo, struct ckpt_fileinfo** cfi, size_t *cfisize,
+	struct vn_hdr** vnh)
 {
 	int error;
 	size_t size;
@@ -527,7 +545,7 @@ elf_demarshalprocnotes(void *src, size_t *off, prpsinfo_t *psinfo,
 	TRACE_ENTER;
 
 	size = sizeof(prpsinfo_t);
-	error = elf_getnote(src, off, "CORE", NT_PRPSINFO, (void **)&psinfo,
+	error = elf_getnote(src, off, notesz, "CORE", NT_PRPSINFO, (void **)&psinfo,
 		sizeof(prpsinfo_t), &size);
 	if (error)
 		return error;
@@ -539,14 +557,14 @@ elf_demarshalprocnotes(void *src, size_t *off, prpsinfo_t *psinfo,
 
 	*cfi = NULL;
 	if (psinfo->pr_nfiles > 0) {
-		error = elf_getnote(src, off, "DragonFly", NT_DRAGONFLY_FILES,
+		error = elf_getnote(src, off, notesz, "DragonFly", NT_DRAGONFLY_FILES,
 			(void **)cfi, 0, cfisize);
 	}
 
 	if (psinfo->pr_nmaps > 0) {
 		*vnh = kmalloc(psinfo->pr_nmaps * sizeof(struct vn_hdr), M_TEMP,
 			M_WAITOK);
-		error = elf_getnote(src, off, "DragonFly", NT_DRAGONFLY_MAPS,
+		error = elf_getnote(src, off, notesz, "DragonFly", NT_DRAGONFLY_MAPS,
 			(void **)vnh, psinfo->pr_nmaps * sizeof(struct vn_hdr), NULL);
 		if (error) {
 			if (*cfi)
@@ -563,7 +581,7 @@ elf_demarshalprocnotes(void *src, size_t *off, prpsinfo_t *psinfo,
 
 
 static int
-elf_demarshallwpnotes(void *src, size_t *off, prstatus_t *status,
+elf_demarshallwpnotes(void *src, size_t *off, size_t notesz, prstatus_t *status,
 	prfpregset_t *fpregset, prsavetls_t *tls, int nthreads)
 {
 	int i;
@@ -574,7 +592,7 @@ elf_demarshallwpnotes(void *src, size_t *off, prstatus_t *status,
 
 	for (i = 0 ; i < nthreads; i++) {
 		size = sizeof(prstatus_t);
-		error = elf_getnote(src, off, "CORE", NT_PRSTATUS, (void **)&status,
+		error = elf_getnote(src, off, notesz, "CORE", NT_PRSTATUS, (void **)&status,
 			sizeof(prstatus_t), &size);
 		if (error)
 			goto done;
@@ -583,11 +601,11 @@ elf_demarshallwpnotes(void *src, size_t *off, prstatus_t *status,
 			error = EINVAL;
 			goto done;
 		}
-		error = elf_getnote(src, off, "CORE", NT_FPREGSET, (void **)&fpregset,
-			sizeof(prfpregset_t), NULL);
+		error = elf_getnote(src, off, notesz, "CORE", NT_FPREGSET,
+			(void **)&fpregset, sizeof(prfpregset_t), NULL);
 		if (error)
 			goto done;
-		error = elf_getnote(src, off, "DragonFly", NT_DRAGONFLY_TLS,
+		error = elf_getnote(src, off, notesz, "DragonFly", NT_DRAGONFLY_TLS,
 			(void **)&tls, sizeof(prsavetls_t), NULL);
 		if (error)
 			goto done;
