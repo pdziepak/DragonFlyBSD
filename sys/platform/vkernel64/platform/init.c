@@ -1526,6 +1526,9 @@ ckpt_sighandler(int sig, siginfo_t *info, void *ctxp)
 		return;
 	}
 
+	crit_enter();
+	stop_cpus(mycpu->gd_other_cpus);
+
 	vcons_save_mode(&tio);
 	netif_close();
 
@@ -1545,7 +1548,7 @@ ckpt_sighandler(int sig, siginfo_t *info, void *ctxp)
 	vcons_restore_mode(&tio);
 
 	kprintf("Restoring vmspaces...\n");
-	for (p = LIST_FIRST(&allproc); p != NULL; p = LIST_NEXT(p, p_list)) {  
+	LIST_FOREACH(p, &allproc, p_list) {
 		PHOLD(p);
 		if (p->p_pid)
 			cpu_vmspace_alloc(p->p_vmspace);
@@ -1553,6 +1556,8 @@ ckpt_sighandler(int sig, siginfo_t *info, void *ctxp)
 	}
 
 	kprintf("Restored from checkpoint...\n");
+	restart_cpus(stopped_cpus);
+	crit_exit();
 }
 
 static
