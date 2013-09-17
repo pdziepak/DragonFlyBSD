@@ -1462,8 +1462,10 @@ void
 netif_close(void)
 {
 	int i;
-	for (i = 0; i < VKNETIF_MAX; i++)
-		close(NetifInfo[i].tap_fd);
+	for (i = 0; i < VKNETIF_MAX; i++) {
+		if (NetifInfo[i].netif_name != NULL)
+			close(NetifInfo[i].tap_fd);
+	}
 }
 
 static
