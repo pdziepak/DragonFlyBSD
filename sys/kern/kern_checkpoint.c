@@ -714,6 +714,7 @@ mmap_vp(struct vn_hdr *vnh)
 	int flags = 0;
 	int fflags;
 	int prot = 0;
+	vm_offset_t base;
 	TRACE_ENTER;
 
 	phdr = &vnh->vnh_phdr;
@@ -756,12 +757,13 @@ mmap_vp(struct vn_hdr *vnh)
 
 			flags |= MAP_VPAGETABLE | MAP_FIXED;
 
-			error = vm_mmap(&curproc->p_vmspace->vm_map, &phdr->p_vaddr,
+			base = phdr->p_vaddr;
+			error = vm_mmap(&curproc->p_vmspace->vm_map, &base,
 				phdr->p_memsz, prot, VM_PROT_ALL, flags, fp->f_data,
 				phdr->p_offset);
 			if (!error) {
 				error = vm_map_madvise(&curproc->p_vmspace->vm_map,
-					phdr->p_vaddr, phdr->p_vaddr + phdr->p_memsz, MADV_SETMAP,
+					base, base + phdr->p_memsz, MADV_SETMAP,
 					vnh->vnh_master_pde);
 			}
 
