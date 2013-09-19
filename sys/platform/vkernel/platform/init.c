@@ -1333,6 +1333,17 @@ init_netif(char *netifExp[], int netifExpNum)
 
 static
 void
+netif_close(void)
+{
+	int i;
+	for (i = 0; i < VKNETIF_MAX; i++) {
+		if (NetifInfo[i].netif_name != NULL)
+			close(NetifInfo[i].tap_fd);
+	}
+}
+
+static
+void
 netif_restore(void)
 {
 	int i, s;
@@ -1376,8 +1387,17 @@ netif_restore(void)
 }
 
 static
+int
+restore_vmspace(struct proc *p, void *dummy)
+{
+	if (p->p_pid)
+		cpu_vmspace_alloc(p->p_vmspace);
+	return 0;
+}
+
+static
 void
-ckpt_sighandler(int sig)
+ckpt_sighandler(int sig, siginfo_t *info, void *ctxp)
 {
 	struct termios tio;
 	int error;
@@ -1388,9 +1408,14 @@ ckpt_sighandler(int sig)
 		return;
 	}
 
+	crit_enter();
+	stop_cpus(mycpu->gd_other_cpus);
+
 	vcons_save_mode(&tio);
+	netif_close();
 
 	msync((void*)KvaStart, KERNEL_KVA_SIZE, MS_SYNC);
+
 	error = sys_checkpoint(CKPT_FREEZE, -1, -1, -1);
 	if (error == 0)
 		exit(0);
@@ -1399,10 +1424,17 @@ ckpt_sighandler(int sig)
 		return;
 	}
 
+	kqueue_update_pid();
 	netif_restore();
 	vcons_restore_mode(&tio);
 
+	kprintf("Restoring vmspaces...\n");
+	allproc_scan(restore_vmspace, NULL);
+	zombproc_scan(restore_vmspace, NULL);
+
 	kprintf("Restored from checkpoint...\n");
+	restart_cpus(stopped_cpus);
+	crit_exit();
 }
 
 static
@@ -1428,8 +1460,8 @@ init_checkpoint(void)
 	}
 
 	bzero(&sa, sizeof(sa));
-	sa.sa_flags = SA_ONSTACK;
-	sa.sa_handler = ckpt_sighandler;
+	sa.sa_flags = SA_ONSTACK | SA_SIGINFO;
+	sa.sa_sigaction = ckpt_sighandler;
 	sigemptyset(&sa.sa_mask);
 
 	if (sigaction(SIGCKPT, &sa, NULL) || sigaction(SIGCKPTEXIT, &sa, NULL)) {

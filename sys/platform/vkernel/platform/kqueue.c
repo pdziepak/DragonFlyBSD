@@ -91,6 +91,13 @@ init_kqueue(void)
 		panic("Cannot configure kqueue for SIGIO, update your kernel");
 }
 
+void
+kqueue_update_pid(void)
+{
+	if (fcntl(KQueueFd, F_SETOWN, getpid()) < 0)
+		panic("Cannot configure kqueue for SIGIO, update your kernel");
+}
+
 /*
  * Signal handler dispatches interrupt thread.  Use interrupt #1
  */
