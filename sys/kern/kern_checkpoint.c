@@ -894,6 +894,7 @@ elf_getfiles(struct lwp *lp, struct file *fp, struct ckpt_fileinfo *cfi_base,
 					break;
 				}
 
+				kev->flags &= ~EV_SYSFLAGS;
 				error = kqueue_register(kq, kev);
 				if (error) {
 					fdrop(tempfp);
