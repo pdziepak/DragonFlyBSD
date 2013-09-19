@@ -61,7 +61,7 @@ struct kqueue_info {
 
 static void kqueuesig(int signo);
 static void kqueue_intr(void *arg __unused, void *frame __unused);
-extern void reinit_kqueue(void);
+
 static int KQueueFd = -1;
 static void *VIntr1;
 
