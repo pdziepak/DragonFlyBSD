@@ -196,10 +196,13 @@ An I/O error occurred while reading from the file system.
 An invalid parameter was specified.
 .El
 .Sh CHECKPOINT FEATURES
-The system checkpointing code will save the process register state (including
-floating point registers), signal state, file descriptors representing
-regular files or directories (anything that can be converted into a file
-handle for storage), and both shared and private memory mappings.
+The system checkpointing code will save register state (including floating point
+registers) and thread local storage of each thread, signal state, file
+descriptors representing kqueues, regular files or directories (anything that
+can be converted into a file handle for storage), and both shared and private
+memory mappings (including
+.Dv MAP_VPAGETABLE
+mappings).
 Private, writable mappings are copied to the checkpoint file while shared
 mappings and stored by referencing the file handle and offset.
 Note that the system checkpointing code does not retain references to
@@ -228,21 +231,13 @@ It is best to checkpoint to a new file and then rename-over the old, or to
 the old file before creating the new
 one so it remains valid as long as the program continues to run.
 .Pp
-Threaded programs cannot currently be checkpointed.
-The program must be
-reduced to a single thread before it can be safely checkpointed.
-.Pp
-.Dv MAP_VPAGETABLE
-mappings cannot currently be checkpointed.
-A program must restore such mappings manually on resumption.
-Only regular file and
-anonymous memory mappings are checkpointed and restored.
+Only
+.Dv MAP_VPAGETABLE,
+regular file and anonymous memory mappings are checkpointed and restored.
 Device and other special mappings are not.
-Only regular file descriptors are checkpointed and restored.
+Only kqueue and regular file descriptors are checkpointed and restored.
 Devices, pipes, sockets, and other special descriptors are not.
 Memory wiring states are not checkpointed or restored.
-.Xr madvise 2
-states are not checkpointed or restored.
 Basic mapping permissions are checkpointed and restored.
 .Sh SECURITY
 The sysctl
