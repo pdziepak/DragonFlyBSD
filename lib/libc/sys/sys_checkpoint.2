@@ -239,6 +239,45 @@ Only kqueue and regular file descriptors are checkpointed and restored.
 Devices, pipes, sockets, and other special descriptors are not.
 Memory wiring states are not checkpointed or restored.
 Basic mapping permissions are checkpointed and restored.
+.Sh IMPLEMENTATION NOTES
+Checkpoint files are basically the standard core dump files with additional
+information stored in ELF notes. Changing the order in which notes appear in the
+file would break compatibility, but adding new notes is safe since all
+unrecognized notes are ignored. Moreover, new fields can be added to
+.Dv NT_PRSTATUS
+and
+.DV NT_PRPSINFO
+since these notes are allowed to be bigger than expected. Current order of the
+notes is as follows:
+.Bl -tag -width ".Dv NT_DRAGONFLY_FILES" -offset compact
+.It Dv NT_PRPSINFO
+This note is also present in the traditional core dumps and contains general
+per-process information such as number of threads, number of opened files,
+number of shared and
+.Dv MAP_VPAGETABLE
+mappings and per-process signal handling information.
+.It Dv NT_DRAGONFLY_FILES
+This note contains an array of ckpt_fileinfo structures, each describing an
+open file descriptor representing either a vnode or a kqueue.
+.It Dv NT_DRAGONFLY_MAPS
+This note contains an array of vn_hdr structures, each representing a shared
+or
+.Dv MAP_VPAGETABLE
+memory mapping.
+.El
+.Pp
+Then, for each thread there is a group of notes in the order as listed below.
+.Bl -tag -width ".Dv NT_DRAGONFLY_TLS" -offset compact
+.It Dv NT_PRSTATUS
+This note is also present in the traditional core dumps and contains general
+per-thread information such as thread ID, general purpose registers state,
+per-thread signal information.
+.It Dv NT_FPREGSET
+This note is also present in the traditional core dumps and contains floating
+point registers state.
+.It Dv NT_DRAGONFLY_TLS
+This note contains thread local storage configuration.
+.El
 .Sh SECURITY
 The sysctl
 .Va kern.ckptgroup
